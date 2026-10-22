@@ -13,9 +13,15 @@ void main() async {
 
   final storageService = StorageService();
   final endTime = await storageService.getEndTime();
+  final schedule = await storageService.getDailySchedule();
 
   bool isLockActive = false;
   if (endTime != null && DateTime.now().isBefore(endTime)) {
+    isLockActive = true;
+  }
+  if (schedule != null) {
+    // Keep the schedule screen available between windows so the user can
+    // see the next run and stop the recurring schedule.
     isLockActive = true;
   }
 

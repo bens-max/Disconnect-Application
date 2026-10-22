@@ -20,6 +20,8 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
     private var blockedApps = setOf<String>()
     private var blockEndTime = 0L
     private var isBlockingActive = false
+    private var dailyScheduleStart = 0
+    private var dailyScheduleEnd = 0
     private val activityManager by lazy { getSystemService(ACTIVITY_SERVICE) as ActivityManager }
     private val keyguardManager by lazy { getSystemService(KeyguardManager::class.java) }
 
@@ -43,6 +45,12 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
         
         // Load initial blocking data
         updateBlockingData()
+
+        if (sharedPreferences.getBoolean("device_lock_requested", false)) {
+            sharedPreferences.edit().putBoolean("device_lock_requested", false).apply()
+            performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+            return
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -51,7 +59,8 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
         // Refresh blocking data in case it changed
         updateBlockingData()
         
-        if (!isBlockingActive || System.currentTimeMillis() > blockEndTime) {
+        if (!isBlockingActive || (!isDailyScheduleActive() &&
+                    System.currentTimeMillis() > blockEndTime)) {
             isBlockingActive = false
             return
         }
@@ -131,7 +140,22 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
             blockedApps = sharedPreferences.getStringSet("blocked_apps_native", emptySet()) ?: emptySet()
             blockEndTime = sharedPreferences.getLong("block_end_time", 0L)
             isBlockingActive = sharedPreferences.getBoolean("is_blocking_active", false) &&
-                    blockEndTime > System.currentTimeMillis()
+                    (sharedPreferences.getBoolean("daily_schedule_enabled", false) ||
+                            blockEndTime > System.currentTimeMillis())
+            dailyScheduleStart = sharedPreferences.getInt("daily_schedule_start", 0)
+            dailyScheduleEnd = sharedPreferences.getInt("daily_schedule_end", 0)
+        }
+    }
+
+    private fun isDailyScheduleActive(): Boolean {
+        if (!sharedPreferences.getBoolean("daily_schedule_enabled", false)) return false
+        val calendar = java.util.Calendar.getInstance()
+        val currentMinutes = calendar.get(java.util.Calendar.HOUR_OF_DAY) * 60 +
+                calendar.get(java.util.Calendar.MINUTE)
+        return if (dailyScheduleStart < dailyScheduleEnd) {
+            currentMinutes >= dailyScheduleStart && currentMinutes < dailyScheduleEnd
+        } else {
+            currentMinutes >= dailyScheduleStart || currentMinutes < dailyScheduleEnd
         }
     }
 }

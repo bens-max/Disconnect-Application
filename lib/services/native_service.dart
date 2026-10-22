@@ -20,15 +20,45 @@ class NativeService {
   static Future<bool> startBlocking(
     List<String> blockedApps,
     DateTime endTime,
+    {bool wholeDevice = false}
   ) async {
     try {
       final result = await platform.invokeMethod<bool>('startBlocking', {
         'blockedApps': blockedApps,
         'endTimeMillis': endTime.millisecondsSinceEpoch,
+        'wholeDevice': wholeDevice,
       });
       return result ?? false;
     } catch (e) {
       print('Error starting native blocking: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> requestDeviceLock() async {
+    try {
+      final result = await platform.invokeMethod<bool>('requestDeviceLock');
+      return result ?? false;
+    } catch (e) {
+      print('Error requesting device lock: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> startDailySchedule(
+    List<String> blockedApps,
+    int startMinutes,
+    int endMinutes,
+  ) async {
+    try {
+      final result = await platform.invokeMethod<bool>('startDailySchedule', {
+        'blockedApps': blockedApps,
+        'startMinutes': startMinutes,
+        'endMinutes': endMinutes,
+      });
+      return result ?? false;
+    } catch (e) {
+      print('Error starting daily schedule: $e');
       return false;
     }
   }

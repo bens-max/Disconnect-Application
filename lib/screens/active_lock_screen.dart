@@ -74,16 +74,46 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
 
   Future<void> _startNativeBlocking() async {
     final blockedApps = await _storageService.getBlockedApps();
+    final wholeDevice = await _storageService.getWholeDeviceMode();
+    final schedule = await _storageService.getDailySchedule();
     final endTime = await _storageService.getEndTime();
 
-    if (endTime != null && blockedApps.isNotEmpty) {
+    if (schedule != null && blockedApps.isNotEmpty) {
+      final success = await NativeService.startDailySchedule(
+        blockedApps,
+        schedule.startMinutes,
+        schedule.endMinutes,
+      );
+      if (mounted) {
+        setState(() {
+          _statusMessage = success
+              ? 'Daily schedule activated for ${blockedApps.length} app(s)'
+              : 'Failed to activate daily schedule';
+        });
+      }
+      return;
+    }
+
+    if (endTime != null && (blockedApps.isNotEmpty || wholeDevice)) {
       // Start native Android blocking with custom accessibility service and foreground service
-      final success = await NativeService.startBlocking(blockedApps, endTime);
+      final success = await NativeService.startBlocking(
+        blockedApps,
+        endTime,
+        wholeDevice: wholeDevice,
+      );
 
       if (success) {
+        if (wholeDevice) {
+          await NativeService.requestDeviceLock();
+          await FlutterAccessibilityService.performGlobalAction(
+            GlobalAction.globalActionLockScreen,
+          );
+        }
         setState(() {
           _statusMessage =
-              'Native blocking activated for ${blockedApps.length} app(s)';
+              wholeDevice
+                  ? 'Whole-device lock activated'
+                  : 'Native blocking activated for ${blockedApps.length} app(s)';
         });
       } else {
         setState(() {
@@ -94,6 +124,15 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
   }
 
   void _startCountdown() async {
+    final schedule = await _storageService.getDailySchedule();
+    if (schedule != null) {
+      _updateScheduleCountdown(schedule.startMinutes, schedule.endMinutes);
+      _timer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _updateScheduleCountdown(schedule.startMinutes, schedule.endMinutes),
+      );
+      return;
+    }
     final endTime = await _storageService.getEndTime();
     if (endTime == null) return;
 
@@ -108,6 +147,41 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
         });
       }
     });
+  }
+
+  void _updateScheduleCountdown(int startMinutes, int endMinutes) {
+    final now = DateTime.now();
+    final currentMinutes = now.hour * 60 + now.minute;
+    final start = DateTime(now.year, now.month, now.day, startMinutes ~/ 60, startMinutes % 60);
+    var end = DateTime(now.year, now.month, now.day, endMinutes ~/ 60, endMinutes % 60);
+    if (endMinutes <= startMinutes) {
+      end = end.add(const Duration(days: 1));
+    }
+    var target = end;
+    final inWindow = startMinutes < endMinutes
+        ? currentMinutes >= startMinutes && currentMinutes < endMinutes
+        : currentMinutes >= startMinutes || currentMinutes < endMinutes;
+    if (!inWindow) {
+      target = currentMinutes < startMinutes
+          ? start
+          : start.add(const Duration(days: 1));
+    }
+    if (mounted) {
+      setState(() {
+        _timeLeft = target.difference(now);
+        _statusMessage = inWindow
+            ? 'Daily schedule is blocking selected apps'
+            : 'Next daily block starts at ${_formatClock(startMinutes)}';
+      });
+    }
+  }
+
+  String _formatClock(int minutes) {
+    final hour = minutes ~/ 60;
+    final minute = minutes % 60;
+    final period = hour >= 12 ? 'PM' : 'AM';
+    final displayHour = hour % 12 == 0 ? 12 : hour % 12;
+    return '$displayHour:${minute.toString().padLeft(2, '0')} $period';
   }
 
   void _initAccessibilityListener() async {
@@ -140,6 +214,8 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
 
   void _onTimeUp() async {
     await _storageService.saveEndTime(null);
+    await _storageService.clearDailySchedule();
+    await _storageService.saveWholeDeviceMode(false);
     await NativeService.stopBlocking();
 
     if (!mounted) return;

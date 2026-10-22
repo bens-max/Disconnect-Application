@@ -21,9 +21,23 @@ class BootCompletedReceiver : BroadcastReceiver() {
             
             val isBlockingActive = sharedPreferences.getBoolean("is_blocking_active", false)
             val blockEndTime = sharedPreferences.getLong("block_end_time", 0L)
+            val dailyScheduleEnabled = sharedPreferences.getBoolean("daily_schedule_enabled", false)
             
             // If blocking was active before reboot and hasn't expired yet, restart it
-            if (isBlockingActive && blockEndTime > System.currentTimeMillis()) {
+            if (isBlockingActive && dailyScheduleEnabled) {
+                val blockedApps = sharedPreferences.getStringSet("blocked_apps_native", emptySet())?.toList() ?: emptyList()
+                val serviceIntent = Intent(context, AppBlockingService::class.java).apply {
+                    action = AppBlockingService.ACTION_START_DAILY_SCHEDULE
+                    putStringArrayListExtra("blocked_apps", ArrayList(blockedApps))
+                    putExtra("start_minutes", sharedPreferences.getInt("daily_schedule_start", 0))
+                    putExtra("end_minutes", sharedPreferences.getInt("daily_schedule_end", 0))
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent)
+                } else {
+                    context.startService(serviceIntent)
+                }
+            } else if (isBlockingActive && blockEndTime > System.currentTimeMillis()) {
                 val blockedApps = sharedPreferences.getStringSet("blocked_apps_native", emptySet())?.toList() ?: emptyList()
                 
                 val serviceIntent = Intent(context, AppBlockingService::class.java).apply {

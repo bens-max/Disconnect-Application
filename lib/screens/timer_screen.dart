@@ -14,6 +14,7 @@ class _TimerScreenState extends State<TimerScreen> {
   final StorageService _storageService = StorageService();
   final TextEditingController _hoursController = TextEditingController(text: '0');
   final TextEditingController _minutesController = TextEditingController(text: '30');
+  bool _wholeDevice = false;
 
   Future<void> _startBlocking() async {
     final int hours = int.tryParse(_hoursController.text) ?? 0;
@@ -29,6 +30,8 @@ class _TimerScreenState extends State<TimerScreen> {
     final duration = Duration(hours: hours, minutes: minutes);
     final endTime = DateTime.now().add(duration);
     
+    await _storageService.clearDailySchedule();
+    await _storageService.saveWholeDeviceMode(_wholeDevice);
     await _storageService.saveEndTime(endTime);
     
     if (mounted) {
@@ -84,6 +87,18 @@ class _TimerScreenState extends State<TimerScreen> {
               ],
             ),
             const Spacer(),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Lock the whole device'),
+              subtitle: Text(
+                _wholeDevice
+                    ? 'The phone will use the normal lock screen.'
+                    : 'Only the selected apps will be disconnected.',
+              ),
+              value: _wholeDevice,
+              onChanged: (value) => setState(() => _wholeDevice = value),
+            ),
+            const SizedBox(height: 12),
             Container(
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(20),
@@ -160,4 +175,3 @@ class _TimerScreenState extends State<TimerScreen> {
     );
   }
 }
-

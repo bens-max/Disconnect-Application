@@ -25,7 +25,19 @@ class MainActivity : FlutterActivity() {
                 "startBlocking" -> {
                     val blockedApps = call.argument<List<String>>("blockedApps") ?: emptyList()
                     val endTimeMillis = call.argument<Long>("endTimeMillis") ?: 0L
-                    startBlocking(blockedApps, endTimeMillis)
+                    val wholeDevice = call.argument<Boolean>("wholeDevice") ?: false
+                    startBlocking(blockedApps, endTimeMillis, wholeDevice)
+                    result.success(true)
+                }
+                "requestDeviceLock" -> {
+                    sharedPreferences.edit().putBoolean("device_lock_requested", true).apply()
+                    result.success(true)
+                }
+                "startDailySchedule" -> {
+                    val blockedApps = call.argument<List<String>>("blockedApps") ?: emptyList()
+                    val startMinutes = call.argument<Int>("startMinutes") ?: 0
+                    val endMinutes = call.argument<Int>("endMinutes") ?: 0
+                    startDailySchedule(blockedApps, startMinutes, endMinutes)
                     result.success(true)
                 }
                 "stopBlocking" -> {
@@ -45,12 +57,21 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun startBlocking(blockedApps: List<String>, endTimeMillis: Long) {
+    private fun startBlocking(
+        blockedApps: List<String>,
+        endTimeMillis: Long,
+        wholeDevice: Boolean,
+    ) {
         // Save blocking data to SharedPreferences
         sharedPreferences.edit().apply {
             putStringSet("blocked_apps_native", blockedApps.toSet())
             putLong("block_end_time", endTimeMillis)
             putBoolean("is_blocking_active", true)
+            remove("daily_schedule_start")
+            remove("daily_schedule_end")
+            putBoolean("daily_schedule_enabled", false)
+            putBoolean("whole_device_mode", wholeDevice)
+            putBoolean("device_lock_requested", false)
             apply()
         }
 
@@ -68,10 +89,42 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun startDailySchedule(
+        blockedApps: List<String>,
+        startMinutes: Int,
+        endMinutes: Int,
+    ) {
+        sharedPreferences.edit().apply {
+            putStringSet("blocked_apps_native", blockedApps.toSet())
+            putInt("daily_schedule_start", startMinutes)
+            putInt("daily_schedule_end", endMinutes)
+            putBoolean("daily_schedule_enabled", true)
+            putBoolean("is_blocking_active", true)
+            apply()
+        }
+
+        val serviceIntent = Intent(this, AppBlockingService::class.java).apply {
+            action = AppBlockingService.ACTION_START_DAILY_SCHEDULE
+            putStringArrayListExtra("blocked_apps", ArrayList(blockedApps))
+            putExtra("start_minutes", startMinutes)
+            putExtra("end_minutes", endMinutes)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
+    }
+
     private fun stopBlocking() {
         sharedPreferences.edit().apply {
             putBoolean("is_blocking_active", false)
             putStringSet("blocked_apps_native", emptySet())
+            remove("daily_schedule_enabled")
+            remove("daily_schedule_start")
+            remove("daily_schedule_end")
+            putBoolean("whole_device_mode", false)
+            putBoolean("device_lock_requested", false)
             apply()
         }
 
@@ -80,6 +133,18 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun isBlockingActive(): Boolean {
+        if (sharedPreferences.getBoolean("daily_schedule_enabled", false)) {
+            val start = sharedPreferences.getInt("daily_schedule_start", 0)
+            val end = sharedPreferences.getInt("daily_schedule_end", 0)
+            val calendar = java.util.Calendar.getInstance()
+            val current = calendar.get(java.util.Calendar.HOUR_OF_DAY) * 60 +
+                    calendar.get(java.util.Calendar.MINUTE)
+            return if (start < end) {
+                current >= start && current < end
+            } else {
+                current >= start || current < end
+            }
+        }
         val endTime = sharedPreferences.getLong("block_end_time", 0L)
         val isActive = sharedPreferences.getBoolean("is_blocking_active", false)
         return isActive && endTime > System.currentTimeMillis()

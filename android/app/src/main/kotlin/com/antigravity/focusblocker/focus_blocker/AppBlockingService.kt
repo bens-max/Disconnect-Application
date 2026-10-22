@@ -17,6 +17,9 @@ class AppBlockingService : Service() {
     private lateinit var sharedPreferences: SharedPreferences
     private var blockedApps = setOf<String>()
     private var blockEndTime = 0L
+    private var dailyScheduleStart = 0
+    private var dailyScheduleEnd = 0
+    private var dailySchedule = false
     private var blockingTimer: Timer? = null
     private val NOTIFICATION_ID = 1001
     private val CHANNEL_ID = "focus_blocker_channel"
@@ -25,6 +28,7 @@ class AppBlockingService : Service() {
         const val ACTION_START_BLOCKING = "com.antigravity.focusblocker.START_BLOCKING"
         const val ACTION_STOP_BLOCKING = "com.antigravity.focusblocker.STOP_BLOCKING"
         const val ACTION_UPDATE_BLOCKING = "com.antigravity.focusblocker.UPDATE_BLOCKING"
+        const val ACTION_START_DAILY_SCHEDULE = "com.antigravity.focusblocker.START_DAILY_SCHEDULE"
     }
 
     override fun onCreate() {
@@ -39,6 +43,12 @@ class AppBlockingService : Service() {
                 val blockedAppsList = intent.getStringArrayListExtra("blocked_apps") ?: emptyList()
                 val endTime = intent.getLongExtra("end_time", 0L)
                 startBlockingSession(blockedAppsList, endTime)
+            }
+            ACTION_START_DAILY_SCHEDULE -> {
+                val blockedAppsList = intent.getStringArrayListExtra("blocked_apps") ?: emptyList()
+                val startMinutes = intent.getIntExtra("start_minutes", 0)
+                val endMinutes = intent.getIntExtra("end_minutes", 0)
+                startDailySchedule(blockedAppsList, startMinutes, endMinutes)
             }
             ACTION_STOP_BLOCKING -> {
                 stopBlockingSession()
@@ -57,6 +67,7 @@ class AppBlockingService : Service() {
      * Starts a new blocking session
      */
     private fun startBlockingSession(blockedAppsList: List<String>, endTime: Long) {
+        dailySchedule = false
         blockedApps = blockedAppsList.toSet()
         blockEndTime = endTime
 
@@ -75,6 +86,27 @@ class AppBlockingService : Service() {
         startBlockingTimer()
     }
 
+    private fun startDailySchedule(
+        blockedAppsList: List<String>,
+        startMinutes: Int,
+        endMinutes: Int,
+    ) {
+        blockedApps = blockedAppsList.toSet()
+        dailyScheduleStart = startMinutes
+        dailyScheduleEnd = endMinutes
+        dailySchedule = true
+        sharedPreferences.edit().apply {
+            putStringSet("blocked_apps_native", blockedApps)
+            putInt("daily_schedule_start", startMinutes)
+            putInt("daily_schedule_end", endMinutes)
+            putBoolean("daily_schedule_enabled", true)
+            putBoolean("is_blocking_active", true)
+            apply()
+        }
+        startForeground(NOTIFICATION_ID, buildNotification())
+        startBlockingTimer()
+    }
+
     /**
      * Stops the blocking session
      */
@@ -85,6 +117,7 @@ class AppBlockingService : Service() {
         sharedPreferences.edit().apply {
             putBoolean("is_blocking_active", false)
             putStringSet("blocked_apps_native", emptySet())
+            putBoolean("daily_schedule_enabled", false)
             apply()
         }
 
@@ -104,15 +137,42 @@ class AppBlockingService : Service() {
                 val now = System.currentTimeMillis()
                 
                 // If blocking time expired, stop the service
-                if (now >= blockEndTime) {
+                if (!dailySchedule && now >= blockEndTime) {
                     stopBlockingSession()
                 } else {
                     // Update notification with time left
-                    val timeLeft = blockEndTime - now
+                    val timeLeft = if (dailySchedule) {
+                        dailyScheduleTimeLeft(now)
+                    } else {
+                        blockEndTime - now
+                    }
                     updateNotification(timeLeft)
                 }
+
             }
         }, 0, 1000) // Check every second
+    }
+
+    private fun dailyScheduleTimeLeft(now: Long): Long {
+        val calendar = Calendar.getInstance().apply { timeInMillis = now }
+        val currentMinutes = calendar.get(Calendar.HOUR_OF_DAY) * 60 + calendar.get(Calendar.MINUTE)
+        val inWindow = if (dailyScheduleStart < dailyScheduleEnd) {
+            currentMinutes >= dailyScheduleStart && currentMinutes < dailyScheduleEnd
+        } else {
+            currentMinutes >= dailyScheduleStart || currentMinutes < dailyScheduleEnd
+        }
+        val target = Calendar.getInstance().apply {
+            timeInMillis = now
+            set(Calendar.HOUR_OF_DAY, if (inWindow) dailyScheduleEnd / 60 else dailyScheduleStart / 60)
+            set(Calendar.MINUTE, if (inWindow) dailyScheduleEnd % 60 else dailyScheduleStart % 60)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+            if ((inWindow && dailyScheduleEnd <= dailyScheduleStart) ||
+                (!inWindow && currentMinutes >= dailyScheduleStart)) {
+                add(Calendar.DAY_OF_YEAR, 1)
+            }
+        }
+        return (target.timeInMillis - now).coerceAtLeast(0)
     }
 
     /**
@@ -187,6 +247,9 @@ class AppBlockingService : Service() {
     private fun updateBlockingInfo() {
         blockedApps = sharedPreferences.getStringSet("blocked_apps_native", emptySet()) ?: emptySet()
         blockEndTime = sharedPreferences.getLong("block_end_time", 0L)
+        dailyScheduleStart = sharedPreferences.getInt("daily_schedule_start", 0)
+        dailyScheduleEnd = sharedPreferences.getInt("daily_schedule_end", 0)
+        dailySchedule = sharedPreferences.getBoolean("daily_schedule_enabled", false)
     }
 
     override fun onDestroy() {

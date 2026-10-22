@@ -4,6 +4,7 @@ import 'package:installed_apps/installed_apps.dart';
 import 'package:installed_apps/app_info.dart';
 import '../services/storage_service.dart';
 import 'timer_screen.dart';
+import 'schedule_screen.dart';
 
 class AppSelectionScreen extends StatefulWidget {
   const AppSelectionScreen({super.key});
@@ -151,23 +152,53 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
           ),
         ],
       ),
-      floatingActionButton: _selectedPackages.isNotEmpty
-          ? FloatingActionButton.extended(
-              onPressed: () async {
-                await _storageService.saveBlockedApps(_selectedPackages.toList());
-                if (!context.mounted) return;
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const TimerScreen()),
-                );
-              },
-              backgroundColor: Theme.of(context).colorScheme.primary,
-              foregroundColor: Colors.black,
-              elevation: 4,
-              label: const Text('Next', style: TextStyle(fontWeight: FontWeight.bold)),
-              icon: const Icon(Icons.arrow_forward),
-            )
-          : null,
+      bottomNavigationBar: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () async {
+                          await _storageService.saveBlockedApps(_selectedPackages.toList());
+                          if (!context.mounted) return;
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (context) => const TimerScreen()),
+                          );
+                        },
+                        icon: const Icon(Icons.timer_outlined),
+                        label: Text(
+                          _selectedPackages.isEmpty
+                              ? 'Set a Whole-Device Timer'
+                              : 'Set a One-Time Timer',
+                        ),
+                      ),
+                    ),
+                    if (_selectedPackages.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: () async {
+                            await _storageService.saveBlockedApps(_selectedPackages.toList());
+                            if (!context.mounted) return;
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (context) => const ScheduleScreen()),
+                            );
+                          },
+                          icon: const Icon(Icons.schedule),
+                          label: const Text('Set a Daily From / To Schedule'),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
 
     );
   }
