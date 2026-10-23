@@ -35,6 +35,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   }
 
   Future<void> _startSchedule() async {
+    if (_isSaving) return;
     if (_minutes(_from) == _minutes(_to)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('From and To times must be different')),
@@ -44,6 +45,14 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
     setState(() => _isSaving = true);
     final blockedApps = await _storageService.getBlockedApps();
+    if (blockedApps.isEmpty) {
+      if (!mounted) return;
+      setState(() => _isSaving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Select at least one app first')),
+      );
+      return;
+    }
     await _storageService.saveDailySchedule(
       startMinutes: _minutes(_from),
       endMinutes: _minutes(_to),
@@ -72,9 +81,10 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Daily Schedule'),
+        title: const Text('Daily schedule'),
         backgroundColor: Colors.transparent,
       ),
       body: Padding(
@@ -82,21 +92,65 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const SizedBox(height: 24),
-            Text(
-              'Disconnect selected apps every day',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.bold,
+            Container(
+              padding: const EdgeInsets.all(22),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    theme.colorScheme.secondary.withValues(alpha: 0.16),
+                    theme.colorScheme.surface,
+                  ],
+                ),
+                borderRadius: BorderRadius.circular(26),
+                border: Border.all(
+                  color: theme.colorScheme.secondary.withValues(alpha: 0.25),
+                ),
+              ),
+              child: const Row(
+                children: [
+                  CircleAvatar(
+                    radius: 25,
+                    backgroundColor: Color(0x3333DAC6),
+                    child: Icon(
+                      Icons.wb_sunny_outlined,
+                      color: Color(0xFF03DAC6),
+                      size: 27,
+                    ),
                   ),
+                  SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'A calmer daily routine',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          'The selected apps disconnect automatically every day.',
+                          style: TextStyle(color: Colors.white60, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 30),
             const Text(
-              'Choose the daily time span. The schedule repeats automatically, including after a restart.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey),
+              'Choose your focus window',
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1,
+              ),
             ),
-            const SizedBox(height: 48),
+            const SizedBox(height: 14),
             _buildTimeTile('FROM', _from, true),
             const SizedBox(height: 16),
             _buildTimeTile('TO', _to, false),
@@ -113,7 +167,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               label: const Text('Start Daily Schedule'),
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 18),
-                backgroundColor: Theme.of(context).colorScheme.primary,
+                backgroundColor: theme.colorScheme.primary,
                 foregroundColor: Colors.black,
               ),
             ),
@@ -124,25 +178,46 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   }
 
   Widget _buildTimeTile(String label, TimeOfDay time, bool isFrom) {
+    final theme = Theme.of(context);
     return InkWell(
       onTap: () => _pickTime(isFrom),
       borderRadius: BorderRadius.circular(20),
-      child: Container(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
         padding: const EdgeInsets.all(20),
         decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
+          color: theme.colorScheme.surface,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.white10),
+          border: Border.all(
+            color: theme.colorScheme.primary.withValues(alpha: 0.18),
+          ),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(label, style: const TextStyle(color: Colors.grey, letterSpacing: 2)),
-            Text(
-              time.format(context),
-              style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w300),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: theme.colorScheme.secondary,
+                    letterSpacing: 2,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  time.format(context),
+                  style: const TextStyle(
+                    fontSize: 30,
+                    fontWeight: FontWeight.w300,
+                  ),
+                ),
+              ],
             ),
-            const Icon(Icons.edit_outlined),
+            Icon(Icons.edit_outlined, color: theme.colorScheme.primary),
           ],
         ),
       ),

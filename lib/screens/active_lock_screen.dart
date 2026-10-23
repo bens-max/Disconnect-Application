@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_accessibility_service/flutter_accessibility_service.dart';
 import 'package:flutter_accessibility_service/constants.dart';
-import 'package:flutter_accessibility_service/accessibility_event.dart';
 import '../services/storage_service.dart';
 import '../services/native_service.dart';
 
@@ -13,25 +12,35 @@ class ActiveLockScreen extends StatefulWidget {
   State<ActiveLockScreen> createState() => _ActiveLockScreenState();
 }
 
-class _ActiveLockScreenState extends State<ActiveLockScreen> {
+class _ActiveLockScreenState extends State<ActiveLockScreen>
+    with WidgetsBindingObserver {
   final StorageService _storageService = StorageService();
   Timer? _timer;
   Duration _timeLeft = Duration.zero;
-  StreamSubscription<AccessibilityEvent>? _accessibilitySubscription;
   bool _accessibilityEnabled = false;
   String _statusMessage = 'Initializing...';
+  bool _permissionDialogVisible = false;
+  BuildContext? _permissionDialogContext;
+  bool _nativeBlockingStarted = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _checkPermissions();
     _startCountdown();
-    _initAccessibilityListener();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkPermissions();
+    }
   }
 
   Future<void> _checkPermissions() async {
-    bool isEnabled =
-        await FlutterAccessibilityService.isAccessibilityPermissionEnabled();
+    final isEnabled = await NativeService.isAccessibilityServiceEnabled();
+    if (!mounted) return;
     setState(() {
       _accessibilityEnabled = isEnabled;
       _statusMessage = isEnabled
@@ -39,36 +48,51 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
           : 'Accessibility Service not enabled';
     });
 
-    if (!isEnabled) {
+    if (isEnabled) {
+      if (_permissionDialogVisible) {
+        final dialogContext = _permissionDialogContext;
+        if (dialogContext != null && dialogContext.mounted) {
+          Navigator.of(dialogContext).pop();
+        }
+        _permissionDialogVisible = false;
+        _permissionDialogContext = null;
+      }
+      if (!_nativeBlockingStarted) {
+        _nativeBlockingStarted = true;
+        await _startNativeBlocking();
+      }
+      return;
+    }
+
+    if (!_permissionDialogVisible) {
+      _permissionDialogVisible = true;
       if (!mounted) return;
       showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (context) => AlertDialog(
-          title: const Text('Permission Required'),
-          content: const Text(
-            'To block other apps, you must enable the Focus Blocker Accessibility Service in your system settings.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () async {
-                await FlutterAccessibilityService.requestAccessibilityPermission();
-                if (!context.mounted) return;
-                Navigator.pop(context);
-                // Recheck after user returns
-                Future.delayed(
-                  const Duration(seconds: 1),
-                  () => _checkPermissions(),
-                );
-              },
-              child: const Text('Enable'),
+        builder: (dialogContext) {
+          _permissionDialogContext = dialogContext;
+          return AlertDialog(
+            title: const Text('Permission Required'),
+            content: const Text(
+              'To block other apps, you must enable the Disconnect Accessibility Service in your system settings.',
             ),
-          ],
-        ),
-      );
-    } else {
-      // Start native blocking if accessibility is enabled
-      _startNativeBlocking();
+            actions: [
+              TextButton(
+                onPressed: () async {
+                  await FlutterAccessibilityService.requestAccessibilityPermission();
+                  if (!dialogContext.mounted) return;
+                  Navigator.pop(dialogContext);
+                },
+                child: const Text('Enable'),
+              ),
+            ],
+          );
+        },
+      ).then((_) {
+        _permissionDialogVisible = false;
+        _permissionDialogContext = null;
+      });
     }
   }
 
@@ -91,6 +115,12 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
               : 'Failed to activate daily schedule';
         });
       }
+      if (!success) {
+        _nativeBlockingStarted = false;
+        await _storageService.clearDailySchedule();
+        await _storageService.saveEndTime(null);
+        await _storageService.saveWholeDeviceMode(false);
+      }
       return;
     }
 
@@ -109,13 +139,17 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
             GlobalAction.globalActionLockScreen,
           );
         }
+        if (!mounted) return;
         setState(() {
-          _statusMessage =
-              wholeDevice
-                  ? 'Whole-device lock activated'
-                  : 'Native blocking activated for ${blockedApps.length} app(s)';
+          _statusMessage = wholeDevice
+              ? 'Whole-device lock activated'
+              : 'Native blocking activated for ${blockedApps.length} app(s)';
         });
       } else {
+        _nativeBlockingStarted = false;
+        await _storageService.saveEndTime(null);
+        await _storageService.saveWholeDeviceMode(false);
+        if (!mounted) return;
         setState(() {
           _statusMessage = 'Failed to activate native blocking';
         });
@@ -123,13 +157,16 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
     }
   }
 
-  void _startCountdown() async {
+  Future<void> _startCountdown() async {
     final schedule = await _storageService.getDailySchedule();
     if (schedule != null) {
       _updateScheduleCountdown(schedule.startMinutes, schedule.endMinutes);
       _timer = Timer.periodic(
         const Duration(seconds: 1),
-        (_) => _updateScheduleCountdown(schedule.startMinutes, schedule.endMinutes),
+        (_) => _updateScheduleCountdown(
+          schedule.startMinutes,
+          schedule.endMinutes,
+        ),
       );
       return;
     }
@@ -141,7 +178,7 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
       if (now.isAfter(endTime)) {
         timer.cancel();
         _onTimeUp();
-      } else {
+      } else if (mounted) {
         setState(() {
           _timeLeft = endTime.difference(now);
         });
@@ -152,8 +189,20 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
   void _updateScheduleCountdown(int startMinutes, int endMinutes) {
     final now = DateTime.now();
     final currentMinutes = now.hour * 60 + now.minute;
-    final start = DateTime(now.year, now.month, now.day, startMinutes ~/ 60, startMinutes % 60);
-    var end = DateTime(now.year, now.month, now.day, endMinutes ~/ 60, endMinutes % 60);
+    final start = DateTime(
+      now.year,
+      now.month,
+      now.day,
+      startMinutes ~/ 60,
+      startMinutes % 60,
+    );
+    var end = DateTime(
+      now.year,
+      now.month,
+      now.day,
+      endMinutes ~/ 60,
+      endMinutes % 60,
+    );
     if (endMinutes <= startMinutes) {
       end = end.add(const Duration(days: 1));
     }
@@ -184,37 +233,8 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
     return '$displayHour:${minute.toString().padLeft(2, '0')} $period';
   }
 
-  void _initAccessibilityListener() async {
-    final blockedApps = await _storageService.getBlockedApps();
-    final endTime = await _storageService.getEndTime();
-
-    _accessibilitySubscription = FlutterAccessibilityService.accessStream.listen((
-      event,
-    ) async {
-      if (event.packageName == null ||
-          !blockedApps.contains(event.packageName)) {
-        return;
-      }
-
-      // Only react to window state changes (app being opened or coming to foreground)
-      if (event.eventType != EventType.typeWindowStateChanged &&
-          event.eventType != EventType.typeWindowsChanged) {
-        return;
-      }
-
-      if (endTime != null && DateTime.now().isBefore(endTime)) {
-        // First, try the custom blocking activity via native service
-        // If that doesn't work, fall back to home button
-        await FlutterAccessibilityService.performGlobalAction(
-          GlobalAction.globalActionHome,
-        );
-      }
-    });
-  }
-
   void _onTimeUp() async {
     await _storageService.saveEndTime(null);
-    await _storageService.clearDailySchedule();
     await _storageService.saveWholeDeviceMode(false);
     await NativeService.stopBlocking();
 
@@ -231,8 +251,8 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
-    _accessibilitySubscription?.cancel();
     super.dispose();
   }
 
@@ -247,30 +267,35 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // Status Card
-              Container(
-                padding: const EdgeInsets.all(16),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 350),
+                padding: const EdgeInsets.all(18),
                 decoration: BoxDecoration(
                   color: _accessibilityEnabled
-                      ? const Color(0xFF03DAC6).withOpacity(0.1)
-                      : Colors.red.withOpacity(0.1),
+                      ? const Color(0xFF03DAC6).withValues(alpha: 0.1)
+                      : Colors.red.withValues(alpha: 0.1),
                   border: Border.all(
                     color: _accessibilityEnabled
                         ? const Color(0xFF03DAC6)
                         : Colors.red,
                   ),
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(20),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      _statusMessage,
-                      style: TextStyle(
-                        color: _accessibilityEnabled
-                            ? const Color(0xFF03DAC6)
-                            : Colors.red,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 250),
+                      child: Text(
+                        _statusMessage,
+                        key: ValueKey(_statusMessage),
+                        style: TextStyle(
+                          color: _accessibilityEnabled
+                              ? const Color(0xFF03DAC6)
+                              : Colors.red,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
                   ],
@@ -287,13 +312,20 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
                       style: TextStyle(fontSize: 16, color: Color(0xFFB0BEC5)),
                     ),
                     const SizedBox(height: 16),
-                    Text(
-                      _formatDuration(_timeLeft),
-                      style: const TextStyle(
-                        fontSize: 48,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFF03DAC6),
-                        fontFamily: 'monospace',
+                    TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0.96, end: 1),
+                      duration: const Duration(milliseconds: 700),
+                      curve: Curves.easeOutBack,
+                      builder: (context, scale, child) =>
+                          Transform.scale(scale: scale, child: child),
+                      child: Text(
+                        _formatDuration(_timeLeft),
+                        style: const TextStyle(
+                          fontSize: 48,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF03DAC6),
+                          fontFamily: 'monospace',
+                        ),
                       ),
                     ),
                   ],
@@ -306,7 +338,8 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E1E1E),
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.white10),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -342,9 +375,9 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: Colors.orange.withOpacity(0.1),
+                  color: Colors.orange.withValues(alpha: 0.1),
                   border: Border.all(color: Colors.orange),
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(20),
                 ),
                 child: const Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -366,19 +399,6 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
                 ),
               ),
               const SizedBox(height: 24),
-
-              // Early Stop Button
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                  onPressed: () => _showStopConfirmation(),
-                  child: const Text('Stop Blocking'),
-                ),
-              ),
             ],
           ),
         ),
@@ -406,29 +426,6 @@ class _ActiveLockScreenState extends State<ActiveLockScreen> {
               text,
               style: const TextStyle(fontSize: 13, color: Color(0xFFB0BEC5)),
             ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showStopConfirmation() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Stop Blocking?'),
-        content: const Text('Are you sure you want to stop blocking now?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _onTimeUp();
-            },
-            child: const Text('Stop'),
           ),
         ],
       ),

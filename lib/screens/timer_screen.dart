@@ -2,6 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/storage_service.dart';
 import 'active_lock_screen.dart';
+import 'app_selection_screen.dart';
+import 'schedule_screen.dart';
+
+enum _TimerType { oneTime, daily }
+
+enum _BlockingScope { allApps, selectedApps }
 
 class TimerScreen extends StatefulWidget {
   const TimerScreen({super.key});
@@ -10,168 +16,359 @@ class TimerScreen extends StatefulWidget {
   State<TimerScreen> createState() => _TimerScreenState();
 }
 
-class _TimerScreenState extends State<TimerScreen> {
+class _TimerScreenState extends State<TimerScreen>
+    with SingleTickerProviderStateMixin {
   final StorageService _storageService = StorageService();
-  final TextEditingController _hoursController = TextEditingController(text: '0');
-  final TextEditingController _minutesController = TextEditingController(text: '30');
-  bool _wholeDevice = false;
+  final _hoursController = TextEditingController(text: '0');
+  final _minutesController = TextEditingController(text: '30');
+  _TimerType _timerType = _TimerType.oneTime;
+  _BlockingScope _scope = _BlockingScope.selectedApps;
+  int _selectedAppCount = 0;
+  bool _isStarting = false;
 
-  Future<void> _startBlocking() async {
-    final int hours = int.tryParse(_hoursController.text) ?? 0;
-    final int minutes = int.tryParse(_minutesController.text) ?? 0;
-    
-    if (hours == 0 && minutes == 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter a valid time')),
+  @override
+  void initState() {
+    super.initState();
+    _loadSelectedApps();
+  }
+
+  Future<void> _loadSelectedApps() async {
+    final apps = await _storageService.getBlockedApps();
+    if (mounted) {
+      setState(() {
+        _selectedAppCount = apps.length;
+      });
+    }
+  }
+
+  Future<void> _chooseApps() async {
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const AppSelectionScreen(returnSelection: true),
+      ),
+    );
+    if (changed == true) _loadSelectedApps();
+  }
+
+  Future<void> _disconnect() async {
+    if (_isStarting) return;
+    if (_timerType == _TimerType.daily) {
+      if (_scope == _BlockingScope.allApps) {
+        _showMessage(
+          'Daily whole-device blocking is not available yet. Choose selected apps.',
+        );
+        return;
+      }
+      if (_selectedAppCount == 0) {
+        _showMessage('Select at least one app for the daily timer.');
+        return;
+      }
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const ScheduleScreen()),
       );
       return;
     }
 
-    final duration = Duration(hours: hours, minutes: minutes);
-    final endTime = DateTime.now().add(duration);
-    
-    await _storageService.clearDailySchedule();
-    await _storageService.saveWholeDeviceMode(_wholeDevice);
-    await _storageService.saveEndTime(endTime);
-    
-    if (mounted) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (context) => const ActiveLockScreen(),
-        ),
+    final hours = int.tryParse(_hoursController.text) ?? 0;
+    final minutes = int.tryParse(_minutesController.text) ?? 0;
+    if (hours < 0 || hours > 999 || minutes < 0 || minutes > 59) {
+      _showMessage(
+        'Hours must be between 0 and 999, and minutes between 0 and 59.',
       );
+      return;
     }
+    if (hours == 0 && minutes == 0) {
+      _showMessage('Enter a duration greater than zero.');
+      return;
+    }
+    if (_scope == _BlockingScope.selectedApps && _selectedAppCount == 0) {
+      _showMessage('Select at least one app to disconnect.');
+      return;
+    }
+
+    setState(() => _isStarting = true);
+    await _storageService.clearDailySchedule();
+    await _storageService.saveWholeDeviceMode(_scope == _BlockingScope.allApps);
+    await _storageService.saveEndTime(
+      DateTime.now().add(Duration(hours: hours, minutes: minutes)),
+    );
+    if (!mounted) return;
+    setState(() => _isStarting = false);
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const ActiveLockScreen()),
+    );
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  void dispose() {
+    _hoursController.dispose();
+    _minutesController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Set Focus Time'),
-        elevation: 0,
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Disconnect', style: TextStyle(fontWeight: FontWeight.bold)),
+            Text(
+              'Choose when and what to disconnect',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ],
+        ),
         backgroundColor: Colors.transparent,
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const SizedBox(height: 24),
-            Text(
-              'How long do you want to stay focused?',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: -0.5,
-                  ),
-            ),
-            const SizedBox(height: 64),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _buildTimeInput(_hoursController, 'Hours'),
-                Padding(
-                  padding: const EdgeInsets.only(left: 16, right: 16, bottom: 24),
-                  child: Text(
-                    ':',
-                    style: TextStyle(
-                      fontSize: 48,
-                      fontWeight: FontWeight.w200,
-                      color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.5),
-                    ),
-                  ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildTimerTypeSelector(theme),
+              const SizedBox(height: 24),
+              if (_timerType == _TimerType.oneTime)
+                _buildDuration(theme)
+              else
+                _buildDailyIntro(theme),
+              const SizedBox(height: 24),
+              _buildScopeSelector(theme),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: _isStarting ? null : _disconnect,
+                icon: Icon(
+                  _timerType == _TimerType.daily
+                      ? Icons.schedule
+                      : Icons.power_settings_new,
                 ),
-                _buildTimeInput(_minutesController, 'Minutes'),
-              ],
-            ),
-            const Spacer(),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Lock the whole device'),
-              subtitle: Text(
-                _wholeDevice
-                    ? 'The phone will use the normal lock screen.'
-                    : 'Only the selected apps will be disconnected.',
-              ),
-              value: _wholeDevice,
-              onChanged: (value) => setState(() => _wholeDevice = value),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(20),
-                boxShadow: [
-                  BoxShadow(
-                    color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.2),
-                    blurRadius: 20,
-                    offset: const Offset(0, 10),
-                  ),
-                ],
-              ),
-              child: ElevatedButton(
-                onPressed: _startBlocking,
+                label: Text(
+                  _isStarting
+                      ? 'Starting...'
+                      : _timerType == _TimerType.daily
+                      ? 'Set daily timer'
+                      : 'Disconnect',
+                ),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.primary,
+                  padding: const EdgeInsets.symmetric(vertical: 18),
+                  backgroundColor: theme.colorScheme.primary,
                   foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(vertical: 20),
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(20),
+                    borderRadius: BorderRadius.circular(18),
                   ),
-                  elevation: 0,
-                ),
-                child: const Text(
-                  'Disconnect',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1),
                 ),
               ),
-            ),
-            const SizedBox(height: 16),
-
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildTimeInput(TextEditingController controller, String label) {
-    return Column(
-      children: [
-        Container(
-          width: 100,
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: Colors.white10),
-          ),
-          child: TextField(
-            controller: controller,
-            keyboardType: TextInputType.number,
-            textAlign: TextAlign.center,
-            inputFormatters: [
-              FilteringTextInputFormatter.digitsOnly,
-              LengthLimitingTextInputFormatter(2),
-            ],
-            style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w300),
-            decoration: const InputDecoration(
-              contentPadding: EdgeInsets.symmetric(vertical: 20),
-              border: InputBorder.none,
-              counterText: '',
-            ),
-          ),
+  Widget _buildTimerTypeSelector(ThemeData theme) {
+    return SegmentedButton<_TimerType>(
+      segments: const [
+        ButtonSegment(
+          value: _TimerType.oneTime,
+          icon: Icon(Icons.timer_outlined),
+          label: Text('Time timer'),
         ),
-        const SizedBox(height: 12),
-        Text(
-          label.toUpperCase(),
-          style: const TextStyle(
-            color: Colors.grey,
-            fontSize: 12,
-            letterSpacing: 2,
-            fontWeight: FontWeight.bold,
-          ),
+        ButtonSegment(
+          value: _TimerType.daily,
+          icon: Icon(Icons.event_repeat),
+          label: Text('Daily timer'),
         ),
       ],
+      selected: {_timerType},
+      onSelectionChanged: (value) => setState(() => _timerType = value.first),
+      style: ButtonStyle(
+        shape: WidgetStatePropertyAll(
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDuration(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'How long should focus last?',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'Tap hours or minutes to enter a duration.',
+          style: TextStyle(color: Colors.grey),
+        ),
+        const SizedBox(height: 18),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _buildNumberField(_hoursController, 'Hours'),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: Text(
+                ':',
+                style: TextStyle(
+                  fontSize: 42,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+            ),
+            _buildNumberField(_minutesController, 'Minutes'),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNumberField(TextEditingController controller, String label) {
+    return SizedBox(
+      width: 112,
+      child: TextField(
+        controller: controller,
+        keyboardType: TextInputType.number,
+        textAlign: TextAlign.center,
+        inputFormatters: [
+          FilteringTextInputFormatter.digitsOnly,
+          LengthLimitingTextInputFormatter(label == 'Minutes' ? 2 : 3),
+        ],
+        style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w300),
+        decoration: InputDecoration(
+          labelText: label,
+          alignLabelWithHint: true,
+          labelStyle: const TextStyle(fontSize: 12),
+          contentPadding: const EdgeInsets.symmetric(vertical: 18),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDailyIntro(ThemeData theme) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.secondary.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: theme.colorScheme.secondary.withValues(alpha: 0.3),
+        ),
+      ),
+      child: const Row(
+        children: [
+          Icon(Icons.wb_sunny_outlined, color: Color(0xFF03DAC6), size: 30),
+          SizedBox(width: 14),
+          Expanded(
+            child: Text(
+              'Set a repeating From and To window. Selected apps will disconnect automatically every day.',
+              style: TextStyle(color: Colors.white70),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildScopeSelector(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'What should be disconnected?',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 12),
+        _scopeTile(
+          theme,
+          _BlockingScope.allApps,
+          Icons.phone_android,
+          'Select all apps',
+          'Lock the whole device during this timer.',
+        ),
+        const SizedBox(height: 10),
+        _scopeTile(
+          theme,
+          _BlockingScope.selectedApps,
+          Icons.apps,
+          'Selected apps',
+          _selectedAppCount == 0
+              ? 'Choose installed apps to disconnect.'
+              : '$_selectedAppCount app${_selectedAppCount == 1 ? '' : 's'} selected.',
+        ),
+      ],
+    );
+  }
+
+  Widget _scopeTile(
+    ThemeData theme,
+    _BlockingScope scope,
+    IconData icon,
+    String title,
+    String subtitle,
+  ) {
+    final selected = _scope == scope;
+    return InkWell(
+      onTap: () {
+        setState(() => _scope = scope);
+        if (scope == _BlockingScope.selectedApps) _chooseApps();
+      },
+      borderRadius: BorderRadius.circular(18),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: selected
+              ? theme.colorScheme.primary.withValues(alpha: 0.14)
+              : theme.colorScheme.surface,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: selected ? theme.colorScheme.primary : Colors.white10,
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              color: selected ? theme.colorScheme.primary : Colors.grey,
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              selected ? Icons.radio_button_checked : Icons.radio_button_off,
+              color: selected ? theme.colorScheme.primary : Colors.grey,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

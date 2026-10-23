@@ -9,6 +9,7 @@
     
     <!-- Foreground Service Permission (Android 12+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     
     <!-- Post Notifications (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -20,7 +21,7 @@
     <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
 
     <application
-        android:label="focus_blocker"
+        android:label="Disconnect"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <!-- Main Activity -->
@@ -66,7 +67,7 @@
         <service
             android:name=".FocusBlockerAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-            android:exported="false">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
@@ -78,7 +79,12 @@
         <!-- Foreground Service for blocking management -->
         <service
             android:name=".AppBlockingService"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Maintains scheduled app blocking sessions" />
+        </service>
         
         <!-- Boot Completed Receiver -->
         <receiver

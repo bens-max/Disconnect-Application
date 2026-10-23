@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Service for communicating with native Android code via MethodChannel
@@ -9,7 +10,19 @@ class NativeService {
     try {
       await platform.invokeMethod('initialize');
     } catch (e) {
-      print('Error initializing native service: $e');
+      debugPrint('Error initializing native service: $e');
+    }
+  }
+
+  static Future<bool> isAccessibilityServiceEnabled() async {
+    try {
+      final result = await platform.invokeMethod<bool>(
+        'isAccessibilityServiceEnabled',
+      );
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error checking accessibility service: $e');
+      return false;
     }
   }
 
@@ -19,9 +32,9 @@ class NativeService {
   /// [endTime] - DateTime when blocking should end
   static Future<bool> startBlocking(
     List<String> blockedApps,
-    DateTime endTime,
-    {bool wholeDevice = false}
-  ) async {
+    DateTime endTime, {
+    bool wholeDevice = false,
+  }) async {
     try {
       final result = await platform.invokeMethod<bool>('startBlocking', {
         'blockedApps': blockedApps,
@@ -30,7 +43,7 @@ class NativeService {
       });
       return result ?? false;
     } catch (e) {
-      print('Error starting native blocking: $e');
+      debugPrint('Error starting native blocking: $e');
       return false;
     }
   }
@@ -40,7 +53,7 @@ class NativeService {
       final result = await platform.invokeMethod<bool>('requestDeviceLock');
       return result ?? false;
     } catch (e) {
-      print('Error requesting device lock: $e');
+      debugPrint('Error requesting device lock: $e');
       return false;
     }
   }
@@ -58,7 +71,7 @@ class NativeService {
       });
       return result ?? false;
     } catch (e) {
-      print('Error starting daily schedule: $e');
+      debugPrint('Error starting daily schedule: $e');
       return false;
     }
   }
@@ -69,7 +82,7 @@ class NativeService {
       final result = await platform.invokeMethod<bool>('stopBlocking');
       return result ?? false;
     } catch (e) {
-      print('Error stopping native blocking: $e');
+      debugPrint('Error stopping native blocking: $e');
       return false;
     }
   }
@@ -80,7 +93,7 @@ class NativeService {
       final result = await platform.invokeMethod<bool>('isBlockingActive');
       return result ?? false;
     } catch (e) {
-      print('Error checking blocking status: $e');
+      debugPrint('Error checking blocking status: $e');
       return false;
     }
   }
@@ -105,7 +118,7 @@ class NativeService {
         ),
       );
     } catch (e) {
-      print('Error getting blocking status: $e');
+      debugPrint('Error getting blocking status: $e');
       return BlockingStatus.empty();
     }
   }

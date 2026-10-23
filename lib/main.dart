@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'screens/app_selection_screen.dart';
+import 'screens/timer_screen.dart';
 import 'screens/active_lock_screen.dart';
 import 'services/storage_service.dart';
 import 'services/native_service.dart';
@@ -20,9 +20,22 @@ void main() async {
     isLockActive = true;
   }
   if (schedule != null) {
-    // Keep the schedule screen available between windows so the user can
-    // see the next run and stop the recurring schedule.
-    isLockActive = true;
+    final now = DateTime.now();
+    final currentMinutes = now.hour * 60 + now.minute;
+    final start = schedule.startMinutes;
+    final end = schedule.endMinutes;
+    final valid =
+        start >= 0 && start < 1440 && end >= 0 && end < 1440 && start != end;
+    final inWindow =
+        valid &&
+        (start < end
+            ? currentMinutes >= start && currentMinutes < end
+            : currentMinutes >= start || currentMinutes < end);
+    isLockActive = isLockActive || inWindow;
+    if (!valid) {
+      await storageService.clearDailySchedule();
+      await NativeService.stopBlocking();
+    }
   }
 
   runApp(FocusBlockerApp(isLockActive: isLockActive));
@@ -36,7 +49,7 @@ class FocusBlockerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Focus Blocker',
+      title: 'Disconnect',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -49,11 +62,26 @@ class FocusBlockerApp extends StatelessWidget {
         ),
         textTheme: GoogleFonts.outfitTextTheme(ThemeData.dark().textTheme),
         useMaterial3: true,
+        appBarTheme: const AppBarTheme(
+          centerTitle: false,
+          scrolledUnderElevation: 0,
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFF24242A),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.all(Radius.circular(18)),
+            borderSide: BorderSide.none,
+          ),
+        ),
+        snackBarTheme: SnackBarThemeData(
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
       ),
-      home: isLockActive
-          ? const ActiveLockScreen()
-          : const AppSelectionScreen(),
-      routes: {'/selection': (context) => const AppSelectionScreen()},
+      home: isLockActive ? const ActiveLockScreen() : const TimerScreen(),
     );
   }
 }

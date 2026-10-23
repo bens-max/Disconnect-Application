@@ -3,6 +3,8 @@ package com.antigravity.focusblocker.focus_blocker
 import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Build
+import android.provider.Settings
+import android.content.ComponentName
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -22,12 +24,31 @@ class MainActivity : FlutterActivity() {
                     // Initialize native components
                     result.success(true)
                 }
+                "isAccessibilityServiceEnabled" -> {
+                    result.success(isAccessibilityServiceEnabled())
+                }
                 "startBlocking" -> {
                     val blockedApps = call.argument<List<String>>("blockedApps") ?: emptyList()
                     val endTimeMillis = call.argument<Long>("endTimeMillis") ?: 0L
                     val wholeDevice = call.argument<Boolean>("wholeDevice") ?: false
-                    startBlocking(blockedApps, endTimeMillis, wholeDevice)
-                    result.success(true)
+                    try {
+                        require(endTimeMillis > System.currentTimeMillis()) {
+                            "The blocking end time must be in the future"
+                        }
+                        require(wholeDevice || blockedApps.isNotEmpty()) {
+                            "Select at least one app or choose whole-device mode"
+                        }
+                        startBlocking(blockedApps, endTimeMillis, wholeDevice)
+                        result.success(true)
+                    } catch (e: IllegalArgumentException) {
+                        result.error("INVALID_BLOCKING_REQUEST", e.message, null)
+                    } catch (e: SecurityException) {
+                        clearFailedBlockingState()
+                        result.error("SERVICE_PERMISSION", "Foreground service permission was denied", e.message)
+                    } catch (e: IllegalStateException) {
+                        clearFailedBlockingState()
+                        result.error("SERVICE_START_FAILED", "Foreground service could not be started", e.message)
+                    }
                 }
                 "requestDeviceLock" -> {
                     sharedPreferences.edit().putBoolean("device_lock_requested", true).apply()
@@ -37,8 +58,28 @@ class MainActivity : FlutterActivity() {
                     val blockedApps = call.argument<List<String>>("blockedApps") ?: emptyList()
                     val startMinutes = call.argument<Int>("startMinutes") ?: 0
                     val endMinutes = call.argument<Int>("endMinutes") ?: 0
-                    startDailySchedule(blockedApps, startMinutes, endMinutes)
-                    result.success(true)
+                    try {
+                        require(blockedApps.isNotEmpty()) {
+                            "Select at least one app for a daily schedule"
+                        }
+                        require(
+                            startMinutes in 0..1439 &&
+                                endMinutes in 0..1439 &&
+                                startMinutes != endMinutes
+                        ) {
+                            "Daily schedule times must be different valid times"
+                        }
+                        startDailySchedule(blockedApps, startMinutes, endMinutes)
+                        result.success(true)
+                    } catch (e: IllegalArgumentException) {
+                        result.error("INVALID_SCHEDULE_REQUEST", e.message, null)
+                    } catch (e: SecurityException) {
+                        clearFailedBlockingState()
+                        result.error("SERVICE_PERMISSION", "Foreground service permission was denied", e.message)
+                    } catch (e: IllegalStateException) {
+                        clearFailedBlockingState()
+                        result.error("SERVICE_START_FAILED", "Foreground service could not be started", e.message)
+                    }
                 }
                 "stopBlocking" -> {
                     stopBlocking()
@@ -54,6 +95,21 @@ class MainActivity : FlutterActivity() {
                 }
                 else -> result.notImplemented()
             }
+        }
+
+    }
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val enabledServices = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        ) ?: return false
+        val expectedService = ComponentName(
+            this,
+            FocusBlockerAccessibilityService::class.java,
+        ).flattenToString()
+        return enabledServices.split(':').any {
+            it.equals(expectedService, ignoreCase = true)
         }
     }
 
@@ -129,7 +185,22 @@ class MainActivity : FlutterActivity() {
         }
 
         val serviceIntent = Intent(this, AppBlockingService::class.java)
-        stopService(serviceIntent)
+        serviceIntent.action = AppBlockingService.ACTION_STOP_BLOCKING
+        startService(serviceIntent)
+    }
+
+    private fun clearFailedBlockingState() {
+        sharedPreferences.edit().apply {
+            putBoolean("is_blocking_active", false)
+            putStringSet("blocked_apps_native", emptySet())
+            remove("block_end_time")
+            remove("daily_schedule_enabled")
+            remove("daily_schedule_start")
+            remove("daily_schedule_end")
+            putBoolean("whole_device_mode", false)
+            putBoolean("device_lock_requested", false)
+            apply()
+        }
     }
 
     private fun isBlockingActive(): Boolean {

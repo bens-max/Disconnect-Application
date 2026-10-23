@@ -38,6 +38,11 @@ class AppBlockingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent == null) {
+            restoreBlockingSession()
+            return START_STICKY
+        }
+
         when (intent?.action) {
             ACTION_START_BLOCKING -> {
                 val blockedAppsList = intent.getStringArrayListExtra("blocked_apps") ?: emptyList()
@@ -59,6 +64,22 @@ class AppBlockingService : Service() {
         }
         
         return START_STICKY
+    }
+
+    private fun restoreBlockingSession() {
+        updateBlockingInfo()
+        if (!sharedPreferences.getBoolean("is_blocking_active", false)) {
+            stopSelf()
+            return
+        }
+
+        if (!dailySchedule && blockEndTime <= System.currentTimeMillis()) {
+            stopBlockingSession()
+            return
+        }
+
+        startForeground(NOTIFICATION_ID, buildNotification())
+        startBlockingTimer()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -117,7 +138,9 @@ class AppBlockingService : Service() {
         sharedPreferences.edit().apply {
             putBoolean("is_blocking_active", false)
             putStringSet("blocked_apps_native", emptySet())
+            remove("block_end_time")
             putBoolean("daily_schedule_enabled", false)
+            putBoolean("whole_device_mode", false)
             apply()
         }
 
@@ -136,17 +159,16 @@ class AppBlockingService : Service() {
             override fun run() {
                 val now = System.currentTimeMillis()
                 
-                // If blocking time expired, stop the service
                 if (!dailySchedule && now >= blockEndTime) {
                     stopBlockingSession()
+                } else if (dailySchedule) {
+                    val inWindow = isDailyScheduleActive(now)
+                    sharedPreferences.edit()
+                        .putBoolean("is_blocking_active", inWindow)
+                        .apply()
+                    updateNotification(dailyScheduleTimeLeft(now))
                 } else {
-                    // Update notification with time left
-                    val timeLeft = if (dailySchedule) {
-                        dailyScheduleTimeLeft(now)
-                    } else {
-                        blockEndTime - now
-                    }
-                    updateNotification(timeLeft)
+                    updateNotification(blockEndTime - now)
                 }
 
             }
@@ -161,6 +183,7 @@ class AppBlockingService : Service() {
         } else {
             currentMinutes >= dailyScheduleStart || currentMinutes < dailyScheduleEnd
         }
+
         val target = Calendar.getInstance().apply {
             timeInMillis = now
             set(Calendar.HOUR_OF_DAY, if (inWindow) dailyScheduleEnd / 60 else dailyScheduleStart / 60)
@@ -173,6 +196,16 @@ class AppBlockingService : Service() {
             }
         }
         return (target.timeInMillis - now).coerceAtLeast(0)
+    }
+
+    private fun isDailyScheduleActive(now: Long): Boolean {
+        val calendar = Calendar.getInstance().apply { timeInMillis = now }
+        val currentMinutes = calendar.get(Calendar.HOUR_OF_DAY) * 60 + calendar.get(Calendar.MINUTE)
+        return if (dailyScheduleStart < dailyScheduleEnd) {
+            currentMinutes >= dailyScheduleStart && currentMinutes < dailyScheduleEnd
+        } else {
+            currentMinutes >= dailyScheduleStart || currentMinutes < dailyScheduleEnd
+        }
     }
 
     /**

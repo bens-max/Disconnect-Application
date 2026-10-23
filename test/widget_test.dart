@@ -10,8 +10,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:focus_blocker/main.dart';
 
 void main() {
-  testWidgets('Focus Blocker smoke test', (WidgetTester tester) async {
+  testWidgets('Disconnect smoke test', (WidgetTester tester) async {
     await tester.pumpWidget(const FocusBlockerApp(isLockActive: false));
-    expect(find.text('Select Apps to Block'), findsOneWidget);
+    expect(find.text('Disconnect'), findsWidgets);
   });
 }

@@ -1,14 +1,12 @@
 package com.antigravity.focusblocker.focus_blocker
 
 import android.app.ActivityManager
-import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
-import androidx.appcompat.app.AppCompatActivity
+import android.app.Activity
 import android.widget.TextView
-import android.widget.Button
 import android.widget.LinearLayout
 import android.graphics.Color
 import android.os.Handler
@@ -21,7 +19,7 @@ import java.util.*
  * Blocking Activity shown when a blocked app is opened.
  * This activity prevents users from accessing the blocked app.
  */
-class BlockingActivity : AppCompatActivity() {
+class BlockingActivity : Activity() {
     
     private lateinit var sharedPreferences: SharedPreferences
     private lateinit var timerTextView: TextView
@@ -119,23 +117,6 @@ class BlockingActivity : AppCompatActivity() {
         }
         rootLayout.addView(timerTextView)
 
-        // Go back button
-        val backButton = Button(this).apply {
-            text = "Return to Home"
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#bb86fc"))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                setMargins(32, 32, 32, 32)
-            }
-            setOnClickListener {
-                goHome()
-            }
-        }
-        rootLayout.addView(backButton)
-
         setContentView(rootLayout)
     }
 
@@ -167,23 +148,10 @@ class BlockingActivity : AppCompatActivity() {
     }
 
     /**
-     * Sends the user back to home screen
-     */
-    private fun goHome() {
-        val intent = Intent(Intent.ACTION_MAIN).apply {
-            addCategory(Intent.CATEGORY_HOME)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        startActivity(intent)
-        finish()
-    }
-
-    /**
      * Override back button
      */
     override fun onBackPressed() {
-        // Prevent back button from closing this activity
-        goHome()
+        // Keep the blocking screen visible until the timer expires.
     }
 
     /**
@@ -191,14 +159,7 @@ class BlockingActivity : AppCompatActivity() {
      */
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         return when (keyCode) {
-            KeyEvent.KEYCODE_HOME -> {
-                goHome()
-                true
-            }
-            KeyEvent.KEYCODE_BACK -> {
-                goHome()
-                true
-            }
+            KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_BACK -> true
             else -> super.onKeyDown(keyCode, event)
         }
     }

@@ -59,9 +59,12 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
         // Refresh blocking data in case it changed
         updateBlockingData()
         
-        if (!isBlockingActive || (!isDailyScheduleActive() &&
-                    System.currentTimeMillis() > blockEndTime)) {
-            isBlockingActive = false
+        val sessionActive = if (sharedPreferences.getBoolean("daily_schedule_enabled", false)) {
+            isDailyScheduleActive()
+        } else {
+            isBlockingActive && System.currentTimeMillis() < blockEndTime
+        }
+        if (!sessionActive) {
             return
         }
 
@@ -72,7 +75,8 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
                 val packageName = event.packageName?.toString() ?: return
                 
                 // If a blocked app is in the foreground, launch blocking activity
-                if (blockedApps.contains(packageName)) {
+                if (packageName != this@FocusBlockerAccessibilityService.packageName &&
+                    blockedApps.contains(packageName)) {
                     launchBlockingActivity()
                 }
             }
@@ -81,10 +85,13 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
 
     override fun onKeyEvent(event: KeyEvent?): Boolean {
         // Intercept home button to prevent users from escaping the blocking activity
-        if (event != null && event.keyCode == KeyEvent.KEYCODE_HOME) {
+        if (event != null && event.keyCode == KeyEvent.KEYCODE_HOME &&
+            isSessionActive()) {
             // Let the blocking service handle this
             val foregroundPackage = getForegroundApp()
-            if (foregroundPackage != null && blockedApps.contains(foregroundPackage)) {
+            if (foregroundPackage != null &&
+                foregroundPackage != packageName &&
+                blockedApps.contains(foregroundPackage)) {
                 launchBlockingActivity()
                 return true // Block the home button press
             }
@@ -106,7 +113,7 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
                         Intent.FLAG_ACTIVITY_CLEAR_TOP or
                         Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                 putExtra("package_name", getForegroundApp())
-                putExtra("end_time", blockEndTime)
+                putExtra("end_time", currentBlockEndTime())
             }
             startActivity(intent)
         } catch (e: Exception) {
@@ -157,5 +164,32 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
         } else {
             currentMinutes >= dailyScheduleStart || currentMinutes < dailyScheduleEnd
         }
+    }
+
+    private fun isSessionActive(): Boolean {
+        return if (sharedPreferences.getBoolean("daily_schedule_enabled", false)) {
+            isDailyScheduleActive()
+        } else {
+            sharedPreferences.getBoolean("is_blocking_active", false) &&
+                    System.currentTimeMillis() < blockEndTime
+        }
+    }
+
+    private fun currentBlockEndTime(): Long {
+        if (!sharedPreferences.getBoolean("daily_schedule_enabled", false)) {
+            return blockEndTime
+        }
+
+        val now = java.util.Calendar.getInstance()
+        val end = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, dailyScheduleEnd / 60)
+            set(java.util.Calendar.MINUTE, dailyScheduleEnd % 60)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        if (end.timeInMillis <= now.timeInMillis) {
+            end.add(java.util.Calendar.DAY_OF_YEAR, 1)
+        }
+        return end.timeInMillis
     }
 }

@@ -1,6 +1,6 @@
 {
-    "name": "focus_blocker",
-    "short_name": "focus_blocker",
+    "name": "Disconnect",
+    "short_name": "Disconnect",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
