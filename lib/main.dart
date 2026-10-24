@@ -8,12 +8,18 @@ import 'services/native_service.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize native service
-  await NativeService.initialize();
-
   final storageService = StorageService();
-  final endTime = await storageService.getEndTime();
-  final schedule = await storageService.getDailySchedule();
+  final endTimeFuture = storageService.getEndTime();
+  final scheduleFuture = storageService.getDailySchedule();
+
+  await Future.wait<void>([
+    NativeService.initialize(),
+    endTimeFuture.then((_) {}),
+    scheduleFuture.then((_) {}),
+  ]);
+
+  final endTime = await endTimeFuture;
+  final schedule = await scheduleFuture;
 
   bool isLockActive = false;
   if (endTime != null && DateTime.now().isBefore(endTime)) {
@@ -72,6 +78,23 @@ class FocusBlockerApp extends StatelessWidget {
           border: OutlineInputBorder(
             borderRadius: BorderRadius.all(Radius.circular(18)),
             borderSide: BorderSide.none,
+          ),
+        ),
+        cardTheme: CardThemeData(
+          color: const Color(0xFF1E1E26),
+          elevation: 0,
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            elevation: 0,
+            minimumSize: const Size.fromHeight(54),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+            ),
           ),
         ),
         snackBarTheme: SnackBarThemeData(

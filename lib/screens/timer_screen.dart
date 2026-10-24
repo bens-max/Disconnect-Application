@@ -16,11 +16,10 @@ class TimerScreen extends StatefulWidget {
   State<TimerScreen> createState() => _TimerScreenState();
 }
 
-class _TimerScreenState extends State<TimerScreen>
-    with SingleTickerProviderStateMixin {
+class _TimerScreenState extends State<TimerScreen> {
   final StorageService _storageService = StorageService();
-  final _hoursController = TextEditingController(text: '0');
-  final _minutesController = TextEditingController(text: '30');
+  final _hoursController = TextEditingController(text: '00');
+  final _minutesController = TextEditingController(text: '00');
   _TimerType _timerType = _TimerType.oneTime;
   _BlockingScope _scope = _BlockingScope.selectedApps;
   int _selectedAppCount = 0;
@@ -138,15 +137,15 @@ class _TimerScreenState extends State<TimerScreen>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              _buildWelcomeCard(theme),
+              const SizedBox(height: 20),
               _buildTimerTypeSelector(theme),
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
               if (_timerType == _TimerType.oneTime)
                 _buildDuration(theme)
               else
                 _buildDailyIntro(theme),
-              const SizedBox(height: 24),
-              _buildScopeSelector(theme),
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
               ElevatedButton.icon(
                 onPressed: _isStarting ? null : _disconnect,
                 icon: Icon(
@@ -170,9 +169,61 @@ class _TimerScreenState extends State<TimerScreen>
                   ),
                 ),
               ),
+              const SizedBox(height: 28),
+              _buildScopeSelector(theme),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildWelcomeCard(ThemeData theme) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            theme.colorScheme.primary.withValues(alpha: 0.22),
+            theme.colorScheme.secondary.withValues(alpha: 0.08),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(
+          color: theme.colorScheme.primary.withValues(alpha: 0.24),
+        ),
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 28,
+            backgroundColor: theme.colorScheme.primary.withValues(alpha: 0.18),
+            child: Icon(
+              Icons.self_improvement_rounded,
+              color: theme.colorScheme.primary,
+              size: 30,
+            ),
+          ),
+          const SizedBox(width: 16),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Make room for focus',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                ),
+                SizedBox(height: 5),
+                Text(
+                  'Set a timer, then choose the apps you want to pause.',
+                  style: TextStyle(color: Colors.white70, height: 1.35),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -206,12 +257,12 @@ class _TimerScreenState extends State<TimerScreen>
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'How long should focus last?',
+          'Set your focus duration',
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 6),
         const Text(
-          'Tap hours or minutes to enter a duration.',
+          'Adjust the hours and minutes below to set your disconnect time.',
           style: TextStyle(color: Colors.grey),
         ),
         const SizedBox(height: 18),
@@ -239,21 +290,32 @@ class _TimerScreenState extends State<TimerScreen>
   Widget _buildNumberField(TextEditingController controller, String label) {
     return SizedBox(
       width: 112,
-      child: TextField(
-        controller: controller,
-        keyboardType: TextInputType.number,
-        textAlign: TextAlign.center,
-        inputFormatters: [
-          FilteringTextInputFormatter.digitsOnly,
-          LengthLimitingTextInputFormatter(label == 'Minutes' ? 2 : 3),
+      child: Column(
+        children: [
+          TextField(
+            controller: controller,
+            keyboardType: TextInputType.number,
+            textAlign: TextAlign.center,
+            inputFormatters: [
+              FilteringTextInputFormatter.digitsOnly,
+              LengthLimitingTextInputFormatter(label == 'Minutes' ? 2 : 3),
+            ],
+            style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w300),
+            decoration: const InputDecoration(
+              hintText: '00',
+              contentPadding: EdgeInsets.symmetric(vertical: 14),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
         ],
-        style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w300),
-        decoration: InputDecoration(
-          labelText: label,
-          alignLabelWithHint: true,
-          labelStyle: const TextStyle(fontSize: 12),
-          contentPadding: const EdgeInsets.symmetric(vertical: 18),
-        ),
       ),
     );
   }
@@ -290,6 +352,11 @@ class _TimerScreenState extends State<TimerScreen>
         const Text(
           'What should be disconnected?',
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'Choose this after setting your timer.',
+          style: TextStyle(color: Colors.grey, fontSize: 13),
         ),
         const SizedBox(height: 12),
         _scopeTile(

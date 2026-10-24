@@ -1,19 +1,13 @@
 package com.antigravity.focusblocker.focus_blocker
 
-import android.app.ActivityManager
 import android.content.SharedPreferences
-import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.app.Activity
 import android.widget.TextView
 import android.widget.LinearLayout
 import android.graphics.Color
-import android.os.Handler
-import android.os.Looper
 import android.view.WindowManager
-import java.text.SimpleDateFormat
-import java.util.*
 
 /**
  * Blocking Activity shown when a blocked app is opened.
@@ -22,11 +16,8 @@ import java.util.*
 class BlockingActivity : Activity() {
     
     private lateinit var sharedPreferences: SharedPreferences
-    private lateinit var timerTextView: TextView
     private lateinit var messageTextView: TextView
     private lateinit var blockedAppTextView: TextView
-    private val handler = Handler(Looper.getMainLooper())
-    private var blockEndTime = 0L
     private var blockedAppName = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,14 +29,11 @@ class BlockingActivity : Activity() {
         sharedPreferences = getSharedPreferences("com.antigravity.focusblocker.focus_blocker", MODE_PRIVATE)
         
         // Get data from intent
-        blockEndTime = intent.getLongExtra("end_time", 0L)
         blockedAppName = intent.getStringExtra("package_name") ?: "this app"
 
         // Create the UI
         createUI()
         
-        // Start timer updates
-        updateTimer()
     }
 
     /**
@@ -103,48 +91,7 @@ class BlockingActivity : Activity() {
         }
         rootLayout.addView(messageTextView)
 
-        // Timer
-        timerTextView = TextView(this).apply {
-            text = "Time remaining: 00:00:00"
-            textSize = 32f
-            setTextColor(Color.parseColor("#03dac6"))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                setMargins(32, 64, 32, 64)
-            }
-        }
-        rootLayout.addView(timerTextView)
-
         setContentView(rootLayout)
-    }
-
-    /**
-     * Updates the timer display
-     */
-    private fun updateTimer() {
-        val now = System.currentTimeMillis()
-        
-        if (now >= blockEndTime) {
-            // Blocking time is up, close this activity
-            finish()
-            return
-        }
-
-        val timeLeft = blockEndTime - now
-        val hours = timeLeft / 3600000
-        val minutes = (timeLeft % 3600000) / 60000
-        val seconds = (timeLeft % 60000) / 1000
-
-        timerTextView.text = String.format(
-            Locale.getDefault(),
-            "Time remaining: %02d:%02d:%02d",
-            hours, minutes, seconds
-        )
-
-        // Schedule next update in 500ms
-        handler.postDelayed({ updateTimer() }, 500)
     }
 
     /**
@@ -172,7 +119,6 @@ class BlockingActivity : Activity() {
     }
 
     override fun onDestroy() {
-        handler.removeCallbacksAndMessages(null)
         super.onDestroy()
     }
 }

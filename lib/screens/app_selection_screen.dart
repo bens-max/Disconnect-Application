@@ -22,6 +22,7 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
   String? _loadError;
   String _searchQuery = '';
   final Map<String, Uint8List?> _appIcons = {};
+  static final Map<String, Uint8List?> _iconCache = {};
   static const _maxCachedIcons = 40;
 
   Color get _accent => Theme.of(context).colorScheme.primary;
@@ -34,13 +35,14 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
 
   Future<void> _loadData() async {
     setState(() => _isLoading = true);
-    _appIcons.clear();
     try {
-      final apps = await InstalledApps.getInstalledApps(
+      final appsFuture = InstalledApps.getInstalledApps(
         excludeSystemApps: true,
         withIcon: false,
       );
-      final selected = await _storageService.getBlockedApps();
+      final selectedFuture = _storageService.getBlockedApps();
+      final apps = await appsFuture;
+      final selected = await selectedFuture;
       apps.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       if (!mounted) return;
       setState(() {
@@ -60,28 +62,50 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
   }
 
   Future<void> _loadIconsInBackground(List<AppInfo> apps) async {
-    for (var app in apps) {
-      if (!mounted) break;
-      try {
-        final info = await InstalledApps.getAppInfo(app.packageName);
-        if (info == null || !mounted || info.icon == null) {
-          continue;
-        }
-        setState(() {
-          _appIcons[app.packageName] = info.icon;
-        });
-      } catch (_) {
-        continue;
+    final missingApps = apps
+        .where((app) => !_iconCache.containsKey(app.packageName))
+        .toList();
+    for (var start = 0; start < missingApps.length; start += 8) {
+      if (!mounted) return;
+      final batch = missingApps.skip(start).take(8);
+      final results = await Future.wait(
+        batch.map((app) async {
+          try {
+            final info = await InstalledApps.getAppInfo(app.packageName);
+            return MapEntry(app.packageName, info?.icon);
+          } catch (_) {
+            return MapEntry<String, Uint8List?>(app.packageName, null);
+          }
+        }),
+      );
+      for (final result in results) {
+        _iconCache[result.key] = result.value;
       }
+      if (mounted) {
+        setState(() {
+          for (final result in results) {
+            _appIcons[result.key] = result.value;
+          }
+        });
+      }
+    }
+    if (mounted) {
+      setState(() {
+        for (final app in apps) {
+          final icon = _iconCache[app.packageName];
+          if (icon != null) {
+            _appIcons[app.packageName] = icon;
+          }
+        }
+      });
     }
   }
 
   List<AppInfo> get _filteredApps {
     if (_searchQuery.isEmpty) return _installedApps;
+    final query = _searchQuery.toLowerCase();
     return _installedApps
-        .where(
-          (app) => app.name.toLowerCase().contains(_searchQuery.toLowerCase()),
-        )
+        .where((app) => app.name.toLowerCase().contains(query))
         .toList();
   }
 
@@ -219,21 +243,16 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
                       ],
                     ),
                   )
-                : ListView.separated(
+                : ListView.builder(
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     itemCount: _filteredApps.length,
-                    separatorBuilder: (context, index) => const Divider(
-                      height: 1,
-                      indent: 80,
-                      color: Color(0xFF2C2C2C),
-                    ),
                     itemBuilder: (context, index) {
                       final app = _filteredApps[index];
                       final isSelected = _selectedPackages.contains(
                         app.packageName,
                       );
-                      return AnimatedContainer(
-                        duration: const Duration(milliseconds: 220),
+                      return RepaintBoundary(
+                        child: Container(
                         margin: const EdgeInsets.symmetric(
                           horizontal: 12,
                           vertical: 3,
@@ -299,6 +318,7 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
                           ),
                           onTap: () => _toggleSelection(app.packageName),
                         ),
+                      ),
                       );
                     },
                   ),

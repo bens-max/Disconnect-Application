@@ -4,14 +4,12 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.ActivityManager
 import android.app.KeyguardManager
-import android.content.Intent
 import android.content.SharedPreferences
 import android.view.accessibility.AccessibilityEvent
-import android.view.KeyEvent
 
 /**
  * Custom Accessibility Service for detecting and blocking app launches.
- * This service receives accessibility events and can launch the blocking activity
+ * This service receives accessibility events and returns to the home screen
  * when a blocked app is detected.
  */
 class FocusBlockerAccessibilityService : AccessibilityService() {
@@ -22,9 +20,6 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
     private var isBlockingActive = false
     private var dailyScheduleStart = 0
     private var dailyScheduleEnd = 0
-    private val activityManager by lazy { getSystemService(ACTIVITY_SERVICE) as ActivityManager }
-    private val keyguardManager by lazy { getSystemService(KeyguardManager::class.java) }
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         
@@ -74,29 +69,13 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
                 val packageName = event.packageName?.toString() ?: return
                 
-                // If a blocked app is in the foreground, launch blocking activity
+                // If a blocked app is in the foreground, return to the home screen.
                 if (packageName != this@FocusBlockerAccessibilityService.packageName &&
                     blockedApps.contains(packageName)) {
-                    launchBlockingActivity()
+                    redirectToHomeScreen()
                 }
             }
         }
-    }
-
-    override fun onKeyEvent(event: KeyEvent?): Boolean {
-        // Intercept home button to prevent users from escaping the blocking activity
-        if (event != null && event.keyCode == KeyEvent.KEYCODE_HOME &&
-            isSessionActive()) {
-            // Let the blocking service handle this
-            val foregroundPackage = getForegroundApp()
-            if (foregroundPackage != null &&
-                foregroundPackage != packageName &&
-                blockedApps.contains(foregroundPackage)) {
-                launchBlockingActivity()
-                return true // Block the home button press
-            }
-        }
-        return super.onKeyEvent(event)
     }
 
     override fun onInterrupt() {
@@ -104,39 +83,10 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Launches the blocking activity to prevent further app usage
+     * Leaves the blocked app without showing an intermediate blocking screen.
      */
-    private fun launchBlockingActivity() {
-        try {
-            val intent = Intent(this, BlockingActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                putExtra("package_name", getForegroundApp())
-                putExtra("end_time", currentBlockEndTime())
-            }
-            startActivity(intent)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    /**
-     * Gets the currently focused/foreground app package name
-     */
-    private fun getForegroundApp(): String? {
-        return try {
-            @Suppress("DEPRECATION")
-            val tasks = activityManager.getRunningTasks(1)
-            if (tasks.isNotEmpty()) {
-                tasks[0].topActivity?.packageName
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
-        }
+    private fun redirectToHomeScreen() {
+        performGlobalAction(GLOBAL_ACTION_HOME)
     }
 
     /**
@@ -166,30 +116,4 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun isSessionActive(): Boolean {
-        return if (sharedPreferences.getBoolean("daily_schedule_enabled", false)) {
-            isDailyScheduleActive()
-        } else {
-            sharedPreferences.getBoolean("is_blocking_active", false) &&
-                    System.currentTimeMillis() < blockEndTime
-        }
-    }
-
-    private fun currentBlockEndTime(): Long {
-        if (!sharedPreferences.getBoolean("daily_schedule_enabled", false)) {
-            return blockEndTime
-        }
-
-        val now = java.util.Calendar.getInstance()
-        val end = java.util.Calendar.getInstance().apply {
-            set(java.util.Calendar.HOUR_OF_DAY, dailyScheduleEnd / 60)
-            set(java.util.Calendar.MINUTE, dailyScheduleEnd % 60)
-            set(java.util.Calendar.SECOND, 0)
-            set(java.util.Calendar.MILLISECOND, 0)
-        }
-        if (end.timeInMillis <= now.timeInMillis) {
-            end.add(java.util.Calendar.DAY_OF_YEAR, 1)
-        }
-        return end.timeInMillis
-    }
 }
