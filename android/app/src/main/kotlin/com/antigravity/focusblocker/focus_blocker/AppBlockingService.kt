@@ -2,6 +2,7 @@ package com.antigravity.focusblocker.focus_blocker
 
 import android.app.*
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.os.Build
 import android.os.IBinder
@@ -13,14 +14,16 @@ import java.util.*
  * This service runs in the background and ensures blocking continuity.
  */
 class AppBlockingService : Service() {
-    
+
     private lateinit var sharedPreferences: SharedPreferences
     private var blockedApps = setOf<String>()
     private var blockEndTime = 0L
     private var dailyScheduleStart = 0
     private var dailyScheduleEnd = 0
     private var dailySchedule = false
+    private var wholeDeviceMode = false
     private var blockingTimer: Timer? = null
+    private var screenOnReceiver: ScreenOnReceiver? = null
     private val NOTIFICATION_ID = 1001
     private val CHANNEL_ID = "focus_blocker_channel"
 
@@ -29,6 +32,7 @@ class AppBlockingService : Service() {
         const val ACTION_STOP_BLOCKING = "com.antigravity.focusblocker.STOP_BLOCKING"
         const val ACTION_UPDATE_BLOCKING = "com.antigravity.focusblocker.UPDATE_BLOCKING"
         const val ACTION_START_DAILY_SCHEDULE = "com.antigravity.focusblocker.START_DAILY_SCHEDULE"
+        const val ACTION_RELOCK_SCREEN = "com.antigravity.focusblocker.RELOCK_SCREEN"
     }
 
     override fun onCreate() {
@@ -61,8 +65,12 @@ class AppBlockingService : Service() {
             ACTION_UPDATE_BLOCKING -> {
                 updateBlockingInfo()
             }
+            ACTION_RELOCK_SCREEN -> {
+                // Re-lock the screen during a whole-device session (triggered by ScreenOnReceiver)
+                relockScreenIfNeeded()
+            }
         }
-        
+
         return START_STICKY
     }
 
@@ -78,6 +86,12 @@ class AppBlockingService : Service() {
             return
         }
 
+        // Re-register ScreenOnReceiver if whole-device mode is still active
+        wholeDeviceMode = sharedPreferences.getBoolean("whole_device_mode", false)
+        if (wholeDeviceMode) {
+            registerScreenOnReceiver()
+        }
+
         startForeground(NOTIFICATION_ID, buildNotification())
         startBlockingTimer()
     }
@@ -91,6 +105,7 @@ class AppBlockingService : Service() {
         dailySchedule = false
         blockedApps = blockedAppsList.toSet()
         blockEndTime = endTime
+        wholeDeviceMode = sharedPreferences.getBoolean("whole_device_mode", false)
 
         // Save to SharedPreferences for accessibility service
         sharedPreferences.edit().apply {
@@ -102,6 +117,12 @@ class AppBlockingService : Service() {
 
         // Start foreground notification
         startForeground(NOTIFICATION_ID, buildNotification())
+
+        // Register ScreenOnReceiver when whole-device mode is active so the device
+        // re-locks every time the screen is turned on by the user.
+        if (wholeDeviceMode) {
+            registerScreenOnReceiver()
+        }
 
         // Start the blocking timer to check expiration
         startBlockingTimer()
@@ -135,6 +156,9 @@ class AppBlockingService : Service() {
         blockingTimer?.cancel()
         blockingTimer = null
 
+        // Unregister ScreenOnReceiver if it was registered
+        unregisterScreenOnReceiver()
+
         sharedPreferences.edit().apply {
             putBoolean("is_blocking_active", false)
             putStringSet("blocked_apps_native", emptySet())
@@ -146,6 +170,41 @@ class AppBlockingService : Service() {
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    /**
+     * Registers a dynamic BroadcastReceiver for ACTION_SCREEN_ON so that the device
+     * is immediately relocked when the user wakes the screen during a whole-device session.
+     * ACTION_SCREEN_ON cannot be declared in the manifest; it must be registered at runtime.
+     */
+    private fun registerScreenOnReceiver() {
+        if (screenOnReceiver != null) return // already registered
+        screenOnReceiver = ScreenOnReceiver()
+        val filter = IntentFilter(Intent.ACTION_SCREEN_ON)
+        registerReceiver(screenOnReceiver, filter)
+    }
+
+    private fun unregisterScreenOnReceiver() {
+        screenOnReceiver?.let {
+            try { unregisterReceiver(it) } catch (_: Exception) {}
+            screenOnReceiver = null
+        }
+    }
+
+    /**
+     * Called when the screen turns on during a whole-device session.
+     * Instructs the Accessibility Service to re-lock the screen.
+     */
+    private fun relockScreenIfNeeded() {
+        val active = sharedPreferences.getBoolean("is_blocking_active", false)
+        val whole = sharedPreferences.getBoolean("whole_device_mode", false)
+        val endTime = sharedPreferences.getLong("block_end_time", 0L)
+        if (active && whole && (sharedPreferences.getBoolean("daily_schedule_enabled", false)
+                || endTime > System.currentTimeMillis())) {
+            // Ask the accessibility service to lock by flagging device_lock_requested.
+            // The service reads this flag on every event and will lock immediately.
+            sharedPreferences.edit().putBoolean("device_lock_requested", true).apply()
+        }
     }
 
     /**
@@ -287,6 +346,7 @@ class AppBlockingService : Service() {
 
     override fun onDestroy() {
         blockingTimer?.cancel()
+        unregisterScreenOnReceiver()
         super.onDestroy()
     }
 }

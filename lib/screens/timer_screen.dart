@@ -20,6 +20,8 @@ class _TimerScreenState extends State<TimerScreen> {
   final StorageService _storageService = StorageService();
   final _hoursController = TextEditingController(text: '00');
   final _minutesController = TextEditingController(text: '00');
+  final _hoursFocusNode = FocusNode();
+  final _minutesFocusNode = FocusNode();
   _TimerType _timerType = _TimerType.oneTime;
   _BlockingScope _scope = _BlockingScope.selectedApps;
   int _selectedAppCount = 0;
@@ -29,6 +31,24 @@ class _TimerScreenState extends State<TimerScreen> {
   void initState() {
     super.initState();
     _loadSelectedApps();
+    // Auto-select all text when the field is focused so the user can
+    // immediately type their value without deleting the placeholder "00".
+    _hoursFocusNode.addListener(() {
+      if (_hoursFocusNode.hasFocus) {
+        _hoursController.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: _hoursController.text.length,
+        );
+      }
+    });
+    _minutesFocusNode.addListener(() {
+      if (_minutesFocusNode.hasFocus) {
+        _minutesController.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: _minutesController.text.length,
+        );
+      }
+    });
   }
 
   Future<void> _loadSelectedApps() async {
@@ -111,6 +131,8 @@ class _TimerScreenState extends State<TimerScreen> {
   void dispose() {
     _hoursController.dispose();
     _minutesController.dispose();
+    _hoursFocusNode.dispose();
+    _minutesFocusNode.dispose();
     super.dispose();
   }
 
@@ -269,7 +291,7 @@ class _TimerScreenState extends State<TimerScreen> {
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            _buildNumberField(_hoursController, 'Hours'),
+                    _buildNumberField(_hoursController, _hoursFocusNode, 'Hours'),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14),
               child: Text(
@@ -280,20 +302,25 @@ class _TimerScreenState extends State<TimerScreen> {
                 ),
               ),
             ),
-            _buildNumberField(_minutesController, 'Minutes'),
+            _buildNumberField(_minutesController, _minutesFocusNode, 'Minutes'),
           ],
         ),
       ],
     );
   }
 
-  Widget _buildNumberField(TextEditingController controller, String label) {
+  Widget _buildNumberField(
+    TextEditingController controller,
+    FocusNode focusNode,
+    String label,
+  ) {
     return SizedBox(
       width: 112,
       child: Column(
         children: [
           TextField(
             controller: controller,
+            focusNode: focusNode,
             keyboardType: TextInputType.number,
             textAlign: TextAlign.center,
             inputFormatters: [
@@ -305,6 +332,17 @@ class _TimerScreenState extends State<TimerScreen> {
               hintText: '00',
               contentPadding: EdgeInsets.symmetric(vertical: 14),
             ),
+            // When editing is complete (e.g. user presses Done), pad with
+            // leading zeros so the field always looks clean: "5" → "05".
+            onEditingComplete: () {
+              final val = controller.text;
+              if (val.isEmpty) {
+                controller.text = '00';
+              } else if (label == 'Minutes' && val.length < 2) {
+                controller.text = val.padLeft(2, '0');
+              }
+              focusNode.unfocus();
+            },
           ),
           const SizedBox(height: 8),
           Text(

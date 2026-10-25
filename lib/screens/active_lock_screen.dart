@@ -4,6 +4,7 @@ import 'package:flutter_accessibility_service/flutter_accessibility_service.dart
 import 'package:flutter_accessibility_service/constants.dart';
 import '../services/storage_service.dart';
 import '../services/native_service.dart';
+import 'timer_screen.dart';
 
 class ActiveLockScreen extends StatefulWidget {
   const ActiveLockScreen({super.key});
@@ -239,7 +240,10 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
     await NativeService.stopBlocking();
 
     if (!mounted) return;
-    Navigator.of(context).pushReplacementNamed('/');
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const TimerScreen()),
+      (_) => false,
+    );
   }
 
   String _formatDuration(Duration duration) {
