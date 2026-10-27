@@ -18,15 +18,13 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
 
     private lateinit var sharedPreferences: SharedPreferences
     private var blockedApps = setOf<String>()
-    private var blockEndTime = 0L
     private var isBlockingActive = false
     private var wholeDeviceMode = false
-    private var dailyScheduleStart = 0
-    private var dailyScheduleEnd = 0
+    private var deviceLockRequested = false
 
     // Packages that are always allowed even in whole-device mode
-    // (system UI, launcher, lock screen, our own app)
-    private val alwaysAllowedPackages = setOf(
+    // (system UI, launcher, lock screen)
+    private val systemAllowedPackages = setOf(
         "com.android.systemui",
         "com.android.launcher",
         "com.android.launcher2",
@@ -41,18 +39,41 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
         "com.zte.mifavor.launcher"
     )
 
+    // Our own package is only reliable after the context is attached, so it is
+    // added lazily instead of being hard-coded in the list above.
+    private val alwaysAllowedPackages: Set<String> by lazy {
+        systemAllowedPackages + packageName
+    }
+
+    /**
+     * Keeps the cached blocking state in sync with SharedPreferences.
+     *
+     * Listener callbacks are delivered on the main thread, which is also where
+     * [onAccessibilityEvent] runs, so all fields above are main-thread confined
+     * and need no locking. This also keeps all preference I/O off the
+     * accessibility event path, which can fire many times per second.
+     */
+    private val preferenceListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            when (key) {
+                PREF_BLOCKED_APPS,
+                PREF_IS_BLOCKING_ACTIVE,
+                PREF_WHOLE_DEVICE_MODE,
+                PREF_DEVICE_LOCK_REQUESTED -> updateBlockingData()
+            }
+        }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
 
-        sharedPreferences = getSharedPreferences(
-            "com.antigravity.focusblocker.focus_blocker",
-            MODE_PRIVATE
-        )
+        sharedPreferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        sharedPreferences.registerOnSharedPreferenceChangeListener(preferenceListener)
 
-        // Configure accessibility service to listen to all window events
+        // Only window transitions are needed to detect foreground app changes.
+        // TYPE_WINDOW_CONTENT_CHANGED is intentionally excluded: it fires very
+        // frequently (scrolling, typing, animations) and adds no value here.
         val info = AccessibilityServiceInfo().apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
                     AccessibilityEvent.TYPE_WINDOWS_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
@@ -65,8 +86,8 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
         updateBlockingData()
 
         // If a lock was requested (from Flutter side), honour it now
-        if (sharedPreferences.getBoolean("device_lock_requested", false)) {
-            sharedPreferences.edit().putBoolean("device_lock_requested", false).apply()
+        if (deviceLockRequested) {
+            clearDeviceLockRequest()
             performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
         }
     }
@@ -74,46 +95,35 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
 
-        // Refresh blocking data on every event so changes take effect immediately
-        updateBlockingData()
-
         // Honour relock requests from ScreenOnReceiver (set via AppBlockingService)
-        if (sharedPreferences.getBoolean("device_lock_requested", false)) {
-            sharedPreferences.edit().putBoolean("device_lock_requested", false).apply()
+        if (deviceLockRequested) {
+            clearDeviceLockRequest()
             performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
             return
         }
 
-        val sessionActive = if (sharedPreferences.getBoolean("daily_schedule_enabled", false)) {
-            isDailyScheduleActive()
-        } else {
-            isBlockingActive && System.currentTimeMillis() < blockEndTime
-        }
-
-        if (!sessionActive) return
-
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
-                val packageName = event.packageName?.toString() ?: return
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> Unit
+            else -> return
+        }
 
-                if (wholeDeviceMode) {
-                    // Whole-device mode: block every app that isn't ours or a system shell
-                    if (packageName != this.packageName &&
-                        !alwaysAllowedPackages.contains(packageName)
-                    ) {
-                        // Re-lock the screen to enforce the whole-device disconnect
-                        performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
-                    }
-                } else {
-                    // Selected-apps mode: only block the apps the user picked
-                    if (packageName != this.packageName &&
-                        blockedApps.contains(packageName)
-                    ) {
-                        redirectToHomeScreen()
-                    }
-                }
+        // `is_blocking_active` is maintained authoritatively by AppBlockingService,
+        // so no additional time check is needed here (it would race its timer).
+        if (!isBlockingActive) return
+
+        val eventPackage = event.packageName?.toString() ?: return
+
+        if (wholeDeviceMode) {
+            // Whole-device mode: block every app that isn't ours or a system shell
+            if (!alwaysAllowedPackages.contains(eventPackage)) {
+                // Re-lock the screen to enforce the whole-device disconnect
+                performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+            }
+        } else {
+            // Selected-apps mode: only block the apps the user picked
+            if (eventPackage != packageName && blockedApps.contains(eventPackage)) {
+                redirectToHomeScreen()
             }
         }
     }
@@ -129,27 +139,29 @@ class FocusBlockerAccessibilityService : AccessibilityService() {
 
     /** Reads the latest blocking configuration from SharedPreferences. */
     private fun updateBlockingData() {
-        synchronized(this) {
-            blockedApps = sharedPreferences.getStringSet("blocked_apps_native", emptySet()) ?: emptySet()
-            blockEndTime = sharedPreferences.getLong("block_end_time", 0L)
-            wholeDeviceMode = sharedPreferences.getBoolean("whole_device_mode", false)
-            isBlockingActive = sharedPreferences.getBoolean("is_blocking_active", false) &&
-                    (sharedPreferences.getBoolean("daily_schedule_enabled", false) ||
-                            blockEndTime > System.currentTimeMillis())
-            dailyScheduleStart = sharedPreferences.getInt("daily_schedule_start", 0)
-            dailyScheduleEnd = sharedPreferences.getInt("daily_schedule_end", 0)
-        }
+        blockedApps = sharedPreferences.getStringSet(PREF_BLOCKED_APPS, emptySet()) ?: emptySet()
+        wholeDeviceMode = sharedPreferences.getBoolean(PREF_WHOLE_DEVICE_MODE, false)
+        isBlockingActive = sharedPreferences.getBoolean(PREF_IS_BLOCKING_ACTIVE, false)
+        deviceLockRequested = sharedPreferences.getBoolean(PREF_DEVICE_LOCK_REQUESTED, false)
     }
 
-    private fun isDailyScheduleActive(): Boolean {
-        if (!sharedPreferences.getBoolean("daily_schedule_enabled", false)) return false
-        val calendar = java.util.Calendar.getInstance()
-        val currentMinutes = calendar.get(java.util.Calendar.HOUR_OF_DAY) * 60 +
-                calendar.get(java.util.Calendar.MINUTE)
-        return if (dailyScheduleStart < dailyScheduleEnd) {
-            currentMinutes >= dailyScheduleStart && currentMinutes < dailyScheduleEnd
-        } else {
-            currentMinutes >= dailyScheduleStart || currentMinutes < dailyScheduleEnd
+    private fun clearDeviceLockRequest() {
+        deviceLockRequested = false
+        sharedPreferences.edit().putBoolean(PREF_DEVICE_LOCK_REQUESTED, false).apply()
+    }
+
+    override fun onDestroy() {
+        if (::sharedPreferences.isInitialized) {
+            sharedPreferences.unregisterOnSharedPreferenceChangeListener(preferenceListener)
         }
+        super.onDestroy()
+    }
+
+    private companion object {
+        const val PREFS_NAME = "com.antigravity.focusblocker.focus_blocker"
+        const val PREF_BLOCKED_APPS = "blocked_apps_native"
+        const val PREF_IS_BLOCKING_ACTIVE = "is_blocking_active"
+        const val PREF_WHOLE_DEVICE_MODE = "whole_device_mode"
+        const val PREF_DEVICE_LOCK_REQUESTED = "device_lock_requested"
     }
 }
