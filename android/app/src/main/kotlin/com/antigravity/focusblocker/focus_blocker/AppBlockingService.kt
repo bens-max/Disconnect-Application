@@ -1,170 +1,193 @@
 package com.antigravity.focusblocker.focus_blocker
 
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
-import java.util.*
+import androidx.core.content.ContextCompat
+import java.util.Date
 
 /**
- * Foreground Service that manages the app blocking logic.
- * This service runs in the background and ensures blocking continuity.
+ * Foreground service that owns the session state and the persistent
+ * notification.
+ *
+ * It does not tick. The notification uses a system-rendered chronometer and a
+ * single Handler callback is scheduled for the next state change (session end
+ * or schedule boundary). This keeps wakeups near zero while a session is idle.
  */
 class AppBlockingService : Service() {
 
     private lateinit var sharedPreferences: SharedPreferences
-    private var blockedApps = setOf<String>()
-    private var blockEndTime = 0L
-    private var dailyScheduleStart = 0
-    private var dailyScheduleEnd = 0
-    private var dailySchedule = false
-    private var wholeDeviceMode = false
-    private var blockingTimer: Timer? = null
     private var screenOnReceiver: ScreenOnReceiver? = null
-    private val NOTIFICATION_ID = 1001
-    private val CHANNEL_ID = "focus_blocker_channel"
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val boundaryRunnable = Runnable { onBoundaryReached() }
+
+    private val notificationId = 1001
+    private val channelId = "disconnect_focus_session_v2"
+    private val legacyChannelId = "focus_blocker_channel"
 
     companion object {
+        private const val TAG = "AppBlockingService"
         const val ACTION_START_BLOCKING = "com.antigravity.focusblocker.START_BLOCKING"
         const val ACTION_STOP_BLOCKING = "com.antigravity.focusblocker.STOP_BLOCKING"
-        const val ACTION_UPDATE_BLOCKING = "com.antigravity.focusblocker.UPDATE_BLOCKING"
         const val ACTION_START_DAILY_SCHEDULE = "com.antigravity.focusblocker.START_DAILY_SCHEDULE"
-        const val ACTION_RELOCK_SCREEN = "com.antigravity.focusblocker.RELOCK_SCREEN"
+        private const val STALE_ELAPSED_TOLERANCE_MS = 5 * 60 * 1000L
     }
 
     override fun onCreate() {
         super.onCreate()
-        sharedPreferences = getSharedPreferences("com.antigravity.focusblocker.focus_blocker", MODE_PRIVATE)
+        sharedPreferences = getSharedPreferences(BlockingState.PREFS_NAME, MODE_PRIVATE)
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null) {
-            restoreBlockingSession()
-            return START_STICKY
-        }
-
         when (intent?.action) {
             ACTION_START_BLOCKING -> {
-                val blockedAppsList = intent.getStringArrayListExtra("blocked_apps") ?: emptyList()
+                val blockedApps = intent.getStringArrayListExtra("blocked_apps") ?: emptyList()
                 val endTime = intent.getLongExtra("end_time", 0L)
-                startBlockingSession(blockedAppsList, endTime)
+                startBlockingSession(blockedApps, endTime)
             }
             ACTION_START_DAILY_SCHEDULE -> {
-                val blockedAppsList = intent.getStringArrayListExtra("blocked_apps") ?: emptyList()
+                val blockedApps = intent.getStringArrayListExtra("blocked_apps") ?: emptyList()
                 val startMinutes = intent.getIntExtra("start_minutes", 0)
                 val endMinutes = intent.getIntExtra("end_minutes", 0)
-                startDailySchedule(blockedAppsList, startMinutes, endMinutes)
+                startDailySchedule(blockedApps, startMinutes, endMinutes)
             }
             ACTION_STOP_BLOCKING -> {
                 stopBlockingSession()
+                return START_NOT_STICKY
             }
-            ACTION_UPDATE_BLOCKING -> {
-                updateBlockingInfo()
-            }
-            ACTION_RELOCK_SCREEN -> {
-                // Re-lock the screen during a whole-device session (triggered by ScreenOnReceiver)
-                relockScreenIfNeeded()
-            }
+            else -> restoreBlockingSession()
         }
-
         return START_STICKY
-    }
-
-    private fun restoreBlockingSession() {
-        updateBlockingInfo()
-        if (!sharedPreferences.getBoolean("is_blocking_active", false)) {
-            stopSelf()
-            return
-        }
-
-        if (!dailySchedule && blockEndTime <= System.currentTimeMillis()) {
-            stopBlockingSession()
-            return
-        }
-
-        // Re-register ScreenOnReceiver if whole-device mode is still active
-        wholeDeviceMode = sharedPreferences.getBoolean("whole_device_mode", false)
-        if (wholeDeviceMode) {
-            registerScreenOnReceiver()
-        }
-
-        startForeground(NOTIFICATION_ID, buildNotification())
-        startBlockingTimer()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    /**
-     * Starts a new blocking session
-     */
-    private fun startBlockingSession(blockedAppsList: List<String>, endTime: Long) {
-        dailySchedule = false
-        blockedApps = blockedAppsList.toSet()
-        blockEndTime = endTime
-        wholeDeviceMode = sharedPreferences.getBoolean("whole_device_mode", false)
+    private fun startBlockingSession(blockedApps: List<String>, endTimeWall: Long) {
+        cancelScheduledWork()
+        val nowWall = System.currentTimeMillis()
+        val remainingWall = endTimeWall - nowWall
+        if (remainingWall <= 0L) {
+            stopBlockingSession()
+            return
+        }
 
-        // Save to SharedPreferences for accessibility service
+        val endElapsed = SystemClock.elapsedRealtime() + remainingWall
+        val wholeDevice = sharedPreferences.getBoolean(BlockingState.PREF_WHOLE_DEVICE_MODE, false)
+
         sharedPreferences.edit().apply {
-            putStringSet("blocked_apps_native", blockedApps)
-            putLong("block_end_time", blockEndTime)
-            putBoolean("is_blocking_active", true)
+            putStringSet(BlockingState.PREF_BLOCKED_APPS, blockedApps.toSet())
+            putLong(BlockingState.PREF_BLOCK_END_TIME, endTimeWall)
+            putLong(BlockingState.PREF_BLOCK_END_ELAPSED, endElapsed)
+            putBoolean(BlockingState.PREF_IS_BLOCKING_ACTIVE, true)
+            putBoolean(BlockingState.PREF_DAILY_SCHEDULE_ENABLED, false)
+            remove(BlockingState.PREF_DAILY_SCHEDULE_START)
+            remove(BlockingState.PREF_DAILY_SCHEDULE_END)
+            putBoolean(BlockingState.PREF_DEVICE_LOCK_REQUESTED, false)
             apply()
         }
 
-        // Start foreground notification
-        startForeground(NOTIFICATION_ID, buildNotification())
-
-        // Register ScreenOnReceiver when whole-device mode is active so the device
-        // re-locks every time the screen is turned on by the user.
-        if (wholeDeviceMode) {
-            registerScreenOnReceiver()
-        }
-
-        // Start the blocking timer to check expiration
-        startBlockingTimer()
+        promoteToForeground()
+        if (wholeDevice) registerScreenOnReceiver() else unregisterScreenOnReceiver()
+        scheduleCallback(remainingWall)
     }
 
     private fun startDailySchedule(
-        blockedAppsList: List<String>,
+        blockedApps: List<String>,
         startMinutes: Int,
         endMinutes: Int,
     ) {
-        blockedApps = blockedAppsList.toSet()
-        dailyScheduleStart = startMinutes
-        dailyScheduleEnd = endMinutes
-        dailySchedule = true
+        cancelScheduledWork()
         sharedPreferences.edit().apply {
-            putStringSet("blocked_apps_native", blockedApps)
-            putInt("daily_schedule_start", startMinutes)
-            putInt("daily_schedule_end", endMinutes)
-            putBoolean("daily_schedule_enabled", true)
-            putBoolean("is_blocking_active", true)
+            putStringSet(BlockingState.PREF_BLOCKED_APPS, blockedApps.toSet())
+            putInt(BlockingState.PREF_DAILY_SCHEDULE_START, startMinutes)
+            putInt(BlockingState.PREF_DAILY_SCHEDULE_END, endMinutes)
+            putBoolean(BlockingState.PREF_DAILY_SCHEDULE_ENABLED, true)
+            putBoolean(BlockingState.PREF_IS_BLOCKING_ACTIVE, true)
+            putBoolean(BlockingState.PREF_WHOLE_DEVICE_MODE, false)
+            putBoolean(BlockingState.PREF_DEVICE_LOCK_REQUESTED, false)
+            remove(BlockingState.PREF_BLOCK_END_TIME)
+            remove(BlockingState.PREF_BLOCK_END_ELAPSED)
             apply()
         }
-        startForeground(NOTIFICATION_ID, buildNotification())
-        startBlockingTimer()
+        promoteToForeground()
+        unregisterScreenOnReceiver()
+        scheduleNextDailyBoundary()
     }
 
     /**
-     * Stops the blocking session
+     * Called by the system after START_STICKY restart (null intent) or after a
+     * reboot/package update.
      */
-    private fun stopBlockingSession() {
-        blockingTimer?.cancel()
-        blockingTimer = null
+    private fun restoreBlockingSession() {
+        val dailyEnabled = sharedPreferences.getBoolean(
+            BlockingState.PREF_DAILY_SCHEDULE_ENABLED,
+            false,
+        )
+        if (dailyEnabled) {
+            promoteToForeground()
+            scheduleNextDailyBoundary()
+            return
+        }
 
-        // Unregister ScreenOnReceiver if it was registered
+        val wallEnd = sharedPreferences.getLong(BlockingState.PREF_BLOCK_END_TIME, 0L)
+        val wallRemaining = (wallEnd - System.currentTimeMillis()).coerceAtLeast(0L)
+        val remaining = BlockingState.remainingSessionMillis(sharedPreferences)
+
+        // A stale elapsed timestamp from before a reboot can be much larger than
+        // the wall-clock remaining time. Trust the wall clock in that case.
+        if (remaining > wallRemaining + STALE_ELAPSED_TOLERANCE_MS) {
+            sharedPreferences.edit()
+                .putLong(
+                    BlockingState.PREF_BLOCK_END_ELAPSED,
+                    SystemClock.elapsedRealtime() + wallRemaining,
+                )
+                .apply()
+        }
+
+        if (!sharedPreferences.getBoolean(BlockingState.PREF_IS_BLOCKING_ACTIVE, false) ||
+            BlockingState.remainingSessionMillis(sharedPreferences) <= 0L
+        ) {
+            stopBlockingSession()
+            return
+        }
+
+        promoteToForeground()
+        val wholeDevice = sharedPreferences.getBoolean(
+            BlockingState.PREF_WHOLE_DEVICE_MODE,
+            false,
+        )
+        if (wholeDevice) registerScreenOnReceiver() else unregisterScreenOnReceiver()
+        scheduleCallback(BlockingState.remainingSessionMillis(sharedPreferences))
+    }
+
+    private fun stopBlockingSession() {
+        cancelScheduledWork()
         unregisterScreenOnReceiver()
 
         sharedPreferences.edit().apply {
-            putBoolean("is_blocking_active", false)
-            putStringSet("blocked_apps_native", emptySet())
-            remove("block_end_time")
-            putBoolean("daily_schedule_enabled", false)
-            putBoolean("whole_device_mode", false)
+            putBoolean(BlockingState.PREF_IS_BLOCKING_ACTIVE, false)
+            putStringSet(BlockingState.PREF_BLOCKED_APPS, emptySet())
+            remove(BlockingState.PREF_BLOCK_END_TIME)
+            remove(BlockingState.PREF_BLOCK_END_ELAPSED)
+            putBoolean(BlockingState.PREF_DAILY_SCHEDULE_ENABLED, false)
+            remove(BlockingState.PREF_DAILY_SCHEDULE_START)
+            remove(BlockingState.PREF_DAILY_SCHEDULE_END)
+            putBoolean(BlockingState.PREF_WHOLE_DEVICE_MODE, false)
+            putBoolean(BlockingState.PREF_DEVICE_LOCK_REQUESTED, false)
             apply()
         }
 
@@ -172,180 +195,168 @@ class AppBlockingService : Service() {
         stopSelf()
     }
 
-    /**
-     * Registers a dynamic BroadcastReceiver for ACTION_SCREEN_ON so that the device
-     * is immediately relocked when the user wakes the screen during a whole-device session.
-     * ACTION_SCREEN_ON cannot be declared in the manifest; it must be registered at runtime.
-     */
-    private fun registerScreenOnReceiver() {
-        if (screenOnReceiver != null) return // already registered
-        screenOnReceiver = ScreenOnReceiver()
-        val filter = IntentFilter(Intent.ACTION_SCREEN_ON)
-        registerReceiver(screenOnReceiver, filter)
-    }
-
-    private fun unregisterScreenOnReceiver() {
-        screenOnReceiver?.let {
-            try { unregisterReceiver(it) } catch (_: Exception) {}
-            screenOnReceiver = null
+    private fun onBoundaryReached() {
+        if (sharedPreferences.getBoolean(BlockingState.PREF_DAILY_SCHEDULE_ENABLED, false)) {
+            // The window changed: the notification text and its countdown target
+            // change at each boundary, so update it once and arm the next one.
+            updateNotification()
+            scheduleNextDailyBoundary()
+            return
         }
-    }
 
-    /**
-     * Called when the screen turns on during a whole-device session.
-     * Instructs the Accessibility Service to re-lock the screen.
-     */
-    private fun relockScreenIfNeeded() {
-        val active = sharedPreferences.getBoolean("is_blocking_active", false)
-        val whole = sharedPreferences.getBoolean("whole_device_mode", false)
-        val endTime = sharedPreferences.getLong("block_end_time", 0L)
-        if (active && whole && (sharedPreferences.getBoolean("daily_schedule_enabled", false)
-                || endTime > System.currentTimeMillis())) {
-            // Ask the accessibility service to lock by flagging device_lock_requested.
-            // The service reads this flag on every event and will lock immediately.
-            sharedPreferences.edit().putBoolean("device_lock_requested", true).apply()
-        }
-    }
-
-    /**
-     * Starts a timer to check blocking expiration
-     */
-    private fun startBlockingTimer() {
-        blockingTimer?.cancel()
-        blockingTimer = Timer()
-        
-        blockingTimer?.scheduleAtFixedRate(object : TimerTask() {
-            override fun run() {
-                val now = System.currentTimeMillis()
-                
-                if (!dailySchedule && now >= blockEndTime) {
-                    stopBlockingSession()
-                } else if (dailySchedule) {
-                    val inWindow = isDailyScheduleActive(now)
-                    sharedPreferences.edit()
-                        .putBoolean("is_blocking_active", inWindow)
-                        .apply()
-                    updateNotification(dailyScheduleTimeLeft(now))
-                } else {
-                    updateNotification(blockEndTime - now)
-                }
-
-            }
-        }, 0, 1000) // Check every second
-    }
-
-    private fun dailyScheduleTimeLeft(now: Long): Long {
-        val calendar = Calendar.getInstance().apply { timeInMillis = now }
-        val currentMinutes = calendar.get(Calendar.HOUR_OF_DAY) * 60 + calendar.get(Calendar.MINUTE)
-        val inWindow = if (dailyScheduleStart < dailyScheduleEnd) {
-            currentMinutes >= dailyScheduleStart && currentMinutes < dailyScheduleEnd
+        if (BlockingState.remainingSessionMillis(sharedPreferences) <= 0L) {
+            stopBlockingSession()
         } else {
-            currentMinutes >= dailyScheduleStart || currentMinutes < dailyScheduleEnd
-        }
-
-        val target = Calendar.getInstance().apply {
-            timeInMillis = now
-            set(Calendar.HOUR_OF_DAY, if (inWindow) dailyScheduleEnd / 60 else dailyScheduleStart / 60)
-            set(Calendar.MINUTE, if (inWindow) dailyScheduleEnd % 60 else dailyScheduleStart % 60)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-            if ((inWindow && dailyScheduleEnd <= dailyScheduleStart) ||
-                (!inWindow && currentMinutes >= dailyScheduleStart)) {
-                add(Calendar.DAY_OF_YEAR, 1)
-            }
-        }
-        return (target.timeInMillis - now).coerceAtLeast(0)
-    }
-
-    private fun isDailyScheduleActive(now: Long): Boolean {
-        val calendar = Calendar.getInstance().apply { timeInMillis = now }
-        val currentMinutes = calendar.get(Calendar.HOUR_OF_DAY) * 60 + calendar.get(Calendar.MINUTE)
-        return if (dailyScheduleStart < dailyScheduleEnd) {
-            currentMinutes >= dailyScheduleStart && currentMinutes < dailyScheduleEnd
-        } else {
-            currentMinutes >= dailyScheduleStart || currentMinutes < dailyScheduleEnd
+            // Defensive: the callback fired slightly early (or the process was
+            // paused); re-arm for the actual remaining time.
+            scheduleCallback(BlockingState.remainingSessionMillis(sharedPreferences))
         }
     }
 
-    /**
-     * Updates notification with current blocking info
-     */
-    private fun updateNotification(timeLeftMillis: Long) {
-        val notification = buildNotification(timeLeftMillis)
+    private fun scheduleCallback(delayMillis: Long) {
+        handler.removeCallbacks(boundaryRunnable)
+        handler.postDelayed(boundaryRunnable, delayMillis.coerceAtLeast(1L))
+    }
+
+    private fun scheduleNextDailyBoundary() {
+        val now = System.currentTimeMillis()
+        val start = sharedPreferences.getInt(BlockingState.PREF_DAILY_SCHEDULE_START, 0)
+        val end = sharedPreferences.getInt(BlockingState.PREF_DAILY_SCHEDULE_END, 0)
+        val boundary = BlockingState.nextDailyBoundary(now, start, end)
+        scheduleCallback((boundary - now).coerceAtLeast(1_000L))
+    }
+
+    private fun cancelScheduledWork() {
+        handler.removeCallbacks(boundaryRunnable)
+    }
+
+    private fun promoteToForeground() {
+        try {
+            startForeground(notificationId, buildNotification())
+        } catch (e: Exception) {
+            // The manifest declares the specialUse foreground service type and
+            // its permission, so this should not happen. Fail safely rather than
+            // crashing the whole process.
+            Log.e(TAG, "startForeground failed", e)
+            stopSelf()
+        }
+    }
+
+    private fun updateNotification() {
         val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(NOTIFICATION_ID, notification)
+        notificationManager.notify(notificationId, buildNotification())
     }
 
-    /**
-     * Builds the notification for the foreground service
-     */
-    private fun buildNotification(timeLeftMillis: Long = 0): Notification {
-        val hours = timeLeftMillis / 3600000
-        val minutes = (timeLeftMillis % 3600000) / 60000
-        val seconds = (timeLeftMillis % 60000) / 1000
-        
-        val timeText = String.format(
-            Locale.getDefault(),
-            "%02d:%02d:%02d",
-            hours, minutes, seconds
+    private fun buildNotification(): Notification {
+        val nowWall = System.currentTimeMillis()
+        val dailyEnabled = sharedPreferences.getBoolean(
+            BlockingState.PREF_DAILY_SCHEDULE_ENABLED,
+            false,
         )
 
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Focus Blocker Active")
-            .setContentText("Apps blocked for $timeText")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_STATUS)
+        val title: String
+        val text: String
+        val countdownTarget: Long
 
-        // Create an intent to open the app
-        val intent = Intent(this, MainActivity::class.java).apply {
+        if (dailyEnabled) {
+            val start = sharedPreferences.getInt(BlockingState.PREF_DAILY_SCHEDULE_START, 0)
+            val end = sharedPreferences.getInt(BlockingState.PREF_DAILY_SCHEDULE_END, 0)
+            val active = BlockingState.isWithinDailyWindow(
+                BlockingState.currentMinutes(nowWall),
+                start,
+                end,
+            )
+            countdownTarget = BlockingState.nextDailyBoundary(nowWall, start, end)
+            title = if (active) "Disconnect is blocking apps" else "Disconnect schedule"
+            text =
+                if (active) {
+                    "Blocked until ${formatTime(countdownTarget)}"
+                } else {
+                    "Next block starts at ${formatTime(countdownTarget)}"
+                }
+        } else {
+            countdownTarget = nowWall + BlockingState.remainingSessionMillis(sharedPreferences)
+            title = "Disconnect is active"
+            text = "Selected apps are blocked"
+        }
+
+        val contentIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         val pendingIntent = PendingIntent.getActivity(
             this,
             0,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            contentIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        builder.setContentIntent(pendingIntent)
 
-        return builder.build()
+        return NotificationCompat.Builder(this, channelId)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setShowWhen(true)
+            .setWhen(countdownTarget)
+            .setUsesChronometer(true)
+            .setChronometerCountDown(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .build()
     }
 
-    /**
-     * Creates notification channel for Android 8.0+
-     */
+    private fun formatTime(millis: Long): String {
+        val formatter = android.text.format.DateFormat.getTimeFormat(this)
+        return formatter.format(Date(millis))
+    }
+
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Focus Blocker",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Notifications for Focus Blocker blocking sessions"
-                enableLights(true)
-                enableVibration(true)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        // Remove the old high-importance channel. Its vibration/lights and
+        // importance cannot be changed after creation.
+        notificationManager.deleteNotificationChannel(legacyChannelId)
+
+        val channel = NotificationChannel(
+            channelId,
+            "Focus session",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = "Shows the active Disconnect focus session"
+            setShowBadge(false)
+            enableLights(false)
+            enableVibration(false)
+            setSound(null, null)
+        }
+        notificationManager.createNotificationChannel(channel)
+    }
+
+    private fun registerScreenOnReceiver() {
+        if (screenOnReceiver != null) return
+        screenOnReceiver = ScreenOnReceiver()
+        ContextCompat.registerReceiver(
+            this,
+            screenOnReceiver,
+            IntentFilter(Intent.ACTION_SCREEN_ON),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+    }
+
+    private fun unregisterScreenOnReceiver() {
+        screenOnReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (_: IllegalArgumentException) {
+                // Already unregistered; ignore.
             }
-            
-            val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.createNotificationChannel(channel)
+            screenOnReceiver = null
         }
     }
 
-    /**
-     * Updates blocking information (called when data changes)
-     */
-    private fun updateBlockingInfo() {
-        blockedApps = sharedPreferences.getStringSet("blocked_apps_native", emptySet()) ?: emptySet()
-        blockEndTime = sharedPreferences.getLong("block_end_time", 0L)
-        dailyScheduleStart = sharedPreferences.getInt("daily_schedule_start", 0)
-        dailyScheduleEnd = sharedPreferences.getInt("daily_schedule_end", 0)
-        dailySchedule = sharedPreferences.getBoolean("daily_schedule_enabled", false)
-    }
-
     override fun onDestroy() {
-        blockingTimer?.cancel()
+        cancelScheduledWork()
         unregisterScreenOnReceiver()
         super.onDestroy()
     }

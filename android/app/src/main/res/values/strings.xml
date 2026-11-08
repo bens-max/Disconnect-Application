@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="accessibility_service_description">This service is used to monitor app launches and block selected apps during focus sessions.</string>
+    <string name="accessibility_service_description">Disconnect checks which app you open so it can return you to the home screen when that app is blocked. It reads only the foreground app\'s package name; it does not read screen content, text, passwords or messages, and no data leaves the device.</string>
 </resources>

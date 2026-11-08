@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Only foreground-window changes are needed to know which package the user
+    opened. Window content, interactive windows and key events are deliberately
+    NOT requested: they add system-wide work to every window/key event and are
+    not used by the blocking logic.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowsChanged|typeWindowStateChanged"
-    android:accessibilityFeedbackType="feedbackVisual"
-    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagRequestTouchExplorationMode|flagRequestEnhancedWebAccessibility|flagReportViewIds|flagRetrieveInteractiveWindows|flagInputMethodEditor"
-    android:canRetrieveWindowContent="true"
-    android:canRequestFilterKeyEvents="true"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="false"
     android:description="@string/accessibility_service_description"
     android:notificationTimeout="100" />

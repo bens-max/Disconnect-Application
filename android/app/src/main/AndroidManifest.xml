@@ -1,24 +1,29 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Core Permissions -->
-    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    
-    <!-- Usage Stats Permission for app monitoring -->
-    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
-    
-    <!-- Foreground Service Permission (Android 12+) -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Foreground service: type specialUse, declared below. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    
-    <!-- Post Notifications (Android 13+) -->
+
+    <!-- Android 13+ runtime permission; requested by MainActivity. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    
-    <!-- Boot Completed -->
+
+    <!-- Restore a session after reboot / app update. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    
-    <!-- Dismiss Keyguard -->
-    <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
+
+    <!--
+        The installed_apps plugin declares QUERY_ALL_PACKAGES and
+        REQUEST_DELETE_PACKAGES. Disconnect only lists launchable apps, so the
+        package-visibility <queries> block below is sufficient and avoids the
+        broad package-access permission. Keep the plugin's permissions out of
+        the merged manifest.
+    -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.REQUEST_DELETE_PACKAGES"
+        tools:node="remove" />
 
     <application
         android:label="Disconnect"
@@ -47,16 +52,19 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        
-        <!-- Blocking Activity (shown when blocked app is opened) -->
+
+        <!--
+            Legacy blocking screen. The current blocker only redirects to the
+            launcher, so this activity is not launched by the app. Keep it
+            unexported so other apps cannot open it.
+        -->
         <activity
             android:name=".BlockingActivity"
-            android:exported="true"
+            android:exported="false"
             android:launchMode="singleInstance"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
-            android:excludeFromRecents="true"
-            android:showOnLockScreen="true" />
-        
+            android:excludeFromRecents="true" />
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
@@ -75,7 +83,7 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
-        
+
         <!-- Foreground Service for blocking management -->
         <service
             android:name=".AppBlockingService"
@@ -85,23 +93,34 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Maintains scheduled app blocking sessions" />
         </service>
-        
-        <!-- Boot Completed Receiver -->
+
+        <!-- Boot / update recovery -->
         <receiver
             android:name=".BootCompletedReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
     </application>
 
-    <!-- Required to query activities that can process text, see:
-         https://developer.android.com/training/package-visibility and
-         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
-
-         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <!--
+        Package visibility for the app picker. The installed_apps plugin only
+        needs launchable apps; this is the narrow replacement for
+        QUERY_ALL_PACKAGES.
+    -->
     <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- Lets the accessibility service allow every installed launcher. -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
+        <!-- Required by the Flutter engine's ProcessTextPlugin. -->
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
