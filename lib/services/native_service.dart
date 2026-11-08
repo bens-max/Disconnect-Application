@@ -58,6 +58,21 @@ class NativeService {
     }
   }
 
+  /// Opens the system Accessibility settings page. The actual permission is
+  /// granted by the user there; checking it is done through
+  /// [isAccessibilityServiceEnabled].
+  static Future<bool> openAccessibilitySettings() async {
+    try {
+      final result = await platform.invokeMethod<bool>(
+        'openAccessibilitySettings',
+      );
+      return result ?? false;
+    } catch (e) {
+      debugPrint('Error opening accessibility settings: $e');
+      return false;
+    }
+  }
+
   static Future<bool> startDailySchedule(
     List<String> blockedApps,
     int startMinutes,

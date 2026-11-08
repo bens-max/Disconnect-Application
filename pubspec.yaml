@@ -1,5 +1,5 @@
 name: focus_blocker
-description: "A new Flutter project."
+description: "Disconnect: a local-only Android focus timer that blocks selected apps or the whole device."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -34,11 +34,8 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
-  flutter_accessibility_service: ^1.0.0
   installed_apps: ^2.1.1
   shared_preferences: ^2.5.5
-  intl: ^0.20.2
-  google_fonts: ^8.0.2
 
 dev_dependencies:
   flutter_test:

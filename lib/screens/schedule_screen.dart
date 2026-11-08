@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/native_service.dart';
 import '../services/storage_service.dart';
+import '../utils/schedule.dart';
 import 'active_lock_screen.dart';
 
 class ScheduleScreen extends StatefulWidget {
@@ -36,7 +37,11 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   Future<void> _startSchedule() async {
     if (_isSaving) return;
-    if (_minutes(_from) == _minutes(_to)) {
+    final window = ScheduleWindow(
+      startMinutes: _minutes(_from),
+      endMinutes: _minutes(_to),
+    );
+    if (!window.isValid) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('From and To times must be different')),
       );
@@ -68,6 +73,9 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     if (!mounted) return;
     setState(() => _isSaving = false);
     if (!success) {
+      await _storageService.clearDailySchedule();
+      await _storageService.saveWholeDeviceMode(false);
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Could not start the daily schedule')),
       );

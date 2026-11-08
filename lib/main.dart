@@ -1,46 +1,57 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'screens/timer_screen.dart';
 import 'screens/active_lock_screen.dart';
 import 'services/storage_service.dart';
 import 'services/native_service.dart';
+import 'utils/schedule.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  await NativeService.initialize();
+
   final storageService = StorageService();
-  final endTimeFuture = storageService.getEndTime();
-  final scheduleFuture = storageService.getDailySchedule();
+  final endTime = await storageService.getEndTime();
+  final schedule = await storageService.getDailySchedule();
+  final blockedApps = await storageService.getBlockedApps();
+  final nativeStatus = await NativeService.getBlockingStatus();
 
-  await Future.wait<void>([
-    NativeService.initialize(),
-    endTimeFuture.then((_) {}),
-    scheduleFuture.then((_) {}),
-  ]);
+  var isLockActive = nativeStatus.isActive;
 
-  final endTime = await endTimeFuture;
-  final schedule = await scheduleFuture;
-
-  bool isLockActive = false;
-  if (endTime != null && DateTime.now().isBefore(endTime)) {
-    isLockActive = true;
+  if (!isLockActive && endTime != null) {
+    if (endTime.isAfter(DateTime.now())) {
+      // The Flutter-side session is still pending (for example the process was
+      // killed right after the timer was saved). Let ActiveLockScreen start the
+      // native session again.
+      isLockActive = true;
+    } else {
+      await storageService.saveEndTime(null);
+      await storageService.saveWholeDeviceMode(false);
+    }
   }
+
   if (schedule != null) {
-    final now = DateTime.now();
-    final currentMinutes = now.hour * 60 + now.minute;
-    final start = schedule.startMinutes;
-    final end = schedule.endMinutes;
-    final valid =
-        start >= 0 && start < 1440 && end >= 0 && end < 1440 && start != end;
-    final inWindow =
-        valid &&
-        (start < end
-            ? currentMinutes >= start && currentMinutes < end
-            : currentMinutes >= start || currentMinutes < end);
-    isLockActive = isLockActive || inWindow;
-    if (!valid) {
+    final window = ScheduleWindow(
+      startMinutes: schedule.startMinutes,
+      endMinutes: schedule.endMinutes,
+    );
+    if (!window.isValid) {
       await storageService.clearDailySchedule();
       await NativeService.stopBlocking();
+    } else {
+      // A saved schedule must keep running even if Android killed the service
+      // while the app was closed. Starting it here also re-arms the next
+      // boundary after a force-stop.
+      if (blockedApps.isNotEmpty) {
+        await NativeService.startDailySchedule(
+          blockedApps,
+          schedule.startMinutes,
+          schedule.endMinutes,
+        );
+      }
+      if (window.contains(DateTime.now())) {
+        isLockActive = true;
+      }
     }
   }
 
@@ -66,7 +77,6 @@ class FocusBlockerApp extends StatelessWidget {
           secondary: Color(0xFF03DAC6),
           surface: Color(0xFF1E1E1E),
         ),
-        textTheme: GoogleFonts.outfitTextTheme(ThemeData.dark().textTheme),
         useMaterial3: true,
         appBarTheme: const AppBarTheme(
           centerTitle: false,

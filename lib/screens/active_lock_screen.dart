@@ -1,9 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter_accessibility_service/flutter_accessibility_service.dart';
-import 'package:flutter_accessibility_service/constants.dart';
 import '../services/storage_service.dart';
 import '../services/native_service.dart';
+import '../utils/schedule.dart';
 import 'timer_screen.dart';
 
 class ActiveLockScreen extends StatefulWidget {
@@ -16,8 +15,10 @@ class ActiveLockScreen extends StatefulWidget {
 class _ActiveLockScreenState extends State<ActiveLockScreen>
     with WidgetsBindingObserver {
   final StorageService _storageService = StorageService();
+  final ValueNotifier<Duration> _timeLeft = ValueNotifier(Duration.zero);
+
   Timer? _timer;
-  Duration _timeLeft = Duration.zero;
+  ScheduleWindow? _schedule;
   bool _accessibilityEnabled = false;
   String _statusMessage = 'Initializing...';
   bool _permissionDialogVisible = false;
@@ -28,36 +29,41 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _checkPermissions();
-    _startCountdown();
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    await _checkPermissions();
+    await _startCountdown();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _checkPermissions();
+      _refreshFromNative();
+    }
+  }
+
+  Future<void> _refreshFromNative() async {
+    await _checkPermissions();
+    if (_nativeBlockingStarted) {
+      await _syncWithNative();
     }
   }
 
   Future<void> _checkPermissions() async {
     final isEnabled = await NativeService.isAccessibilityServiceEnabled();
     if (!mounted) return;
+
     setState(() {
       _accessibilityEnabled = isEnabled;
       _statusMessage = isEnabled
-          ? 'Accessibility Service enabled'
-          : 'Accessibility Service not enabled';
+          ? 'Accessibility service enabled'
+          : 'Accessibility service is off — apps are NOT being blocked';
     });
 
     if (isEnabled) {
-      if (_permissionDialogVisible) {
-        final dialogContext = _permissionDialogContext;
-        if (dialogContext != null && dialogContext.mounted) {
-          Navigator.of(dialogContext).pop();
-        }
-        _permissionDialogVisible = false;
-        _permissionDialogContext = null;
-      }
+      _dismissPermissionDialog();
       if (!_nativeBlockingStarted) {
         _nativeBlockingStarted = true;
         await _startNativeBlocking();
@@ -65,68 +71,115 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
       return;
     }
 
-    if (!_permissionDialogVisible) {
-      _permissionDialogVisible = true;
-      if (!mounted) return;
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (dialogContext) {
-          _permissionDialogContext = dialogContext;
-          return AlertDialog(
-            title: const Text('Permission Required'),
-            content: const Text(
-              'To block other apps, you must enable the Disconnect Accessibility Service in your system settings.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () async {
-                  await FlutterAccessibilityService.requestAccessibilityPermission();
-                  if (!dialogContext.mounted) return;
-                  Navigator.pop(dialogContext);
-                },
-                child: const Text('Enable'),
-              ),
-            ],
-          );
-        },
-      ).then((_) {
-        _permissionDialogVisible = false;
-        _permissionDialogContext = null;
-      });
-    }
+    _showPermissionDialog();
   }
 
-  Future<void> _startNativeBlocking() async {
+  void _showPermissionDialog() {
+    if (_permissionDialogVisible || !mounted) return;
+    _permissionDialogVisible = true;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        _permissionDialogContext = dialogContext;
+        return AlertDialog(
+          title: const Text('Allow Disconnect to detect app launches?'),
+          content: const Text(
+            'Android requires an accessibility service so Disconnect can see '
+            'which app you open. Disconnect only reads the package name of the '
+            'foreground app. It never reads screen text, passwords or messages, '
+            'and nothing leaves this device.\n\n'
+            'Enable Disconnect under Settings → Accessibility to make blocking '
+            'work.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(dialogContext);
+                await NativeService.openAccessibilitySettings();
+              },
+              child: const Text('Open settings'),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(dialogContext);
+                await _endSession();
+              },
+              child: const Text('End session'),
+            ),
+          ],
+        );
+      },
+    ).then((_) {
+      _permissionDialogVisible = false;
+      _permissionDialogContext = null;
+    });
+  }
+
+  void _dismissPermissionDialog() {
+    if (!_permissionDialogVisible) return;
+    final dialogContext = _permissionDialogContext;
+    if (dialogContext != null && dialogContext.mounted) {
+      Navigator.of(dialogContext).pop();
+    }
+    _permissionDialogVisible = false;
+    _permissionDialogContext = null;
+  }
+
+  Future<bool> _startNativeBlocking() async {
     final blockedApps = await _storageService.getBlockedApps();
     final wholeDevice = await _storageService.getWholeDeviceMode();
     final schedule = await _storageService.getDailySchedule();
     final endTime = await _storageService.getEndTime();
 
-    if (schedule != null && blockedApps.isNotEmpty) {
+    // The native service is authoritative. If it is already blocking but the
+    // Flutter-side copy is missing (for example after an app update or a
+    // process restart), do not overwrite the real state with "no session".
+    if (schedule == null && endTime == null) {
+      final nativeStatus = await NativeService.getBlockingStatus();
+      if (nativeStatus.isActive) {
+        _setStatus(
+          'Blocking active for ${nativeStatus.blockedApps.length} app(s)',
+        );
+        return true;
+      }
+    }
+
+    if (schedule != null) {
+      if (blockedApps.isEmpty) {
+        _setStatus('Daily schedule has no apps selected');
+        _nativeBlockingStarted = false;
+        return false;
+      }
+      final window = ScheduleWindow(
+        startMinutes: schedule.startMinutes,
+        endMinutes: schedule.endMinutes,
+      );
+      if (!window.isValid) {
+        await _storageService.clearDailySchedule();
+        _nativeBlockingStarted = false;
+        return false;
+      }
       final success = await NativeService.startDailySchedule(
         blockedApps,
         schedule.startMinutes,
         schedule.endMinutes,
       );
-      if (mounted) {
-        setState(() {
-          _statusMessage = success
-              ? 'Daily schedule activated for ${blockedApps.length} app(s)'
-              : 'Failed to activate daily schedule';
-        });
-      }
+      _setStatus(
+        success
+            ? 'Daily schedule activated for ${blockedApps.length} app(s)'
+            : 'Failed to activate daily schedule',
+      );
       if (!success) {
         _nativeBlockingStarted = false;
         await _storageService.clearDailySchedule();
         await _storageService.saveEndTime(null);
         await _storageService.saveWholeDeviceMode(false);
       }
-      return;
+      return success;
     }
 
     if (endTime != null && (blockedApps.isNotEmpty || wholeDevice)) {
-      // Start native Android blocking with custom accessibility service and foreground service
       final success = await NativeService.startBlocking(
         blockedApps,
         endTime,
@@ -136,94 +189,115 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
       if (success) {
         if (wholeDevice) {
           await NativeService.requestDeviceLock();
-          await FlutterAccessibilityService.performGlobalAction(
-            GlobalAction.globalActionLockScreen,
-          );
         }
-        if (!mounted) return;
-        setState(() {
-          _statusMessage = wholeDevice
+        _setStatus(
+          wholeDevice
               ? 'Whole-device lock activated'
-              : 'Native blocking activated for ${blockedApps.length} app(s)';
-        });
+              : 'Native blocking activated for ${blockedApps.length} app(s)',
+        );
       } else {
         _nativeBlockingStarted = false;
         await _storageService.saveEndTime(null);
         await _storageService.saveWholeDeviceMode(false);
-        if (!mounted) return;
-        setState(() {
-          _statusMessage = 'Failed to activate native blocking';
-        });
+        _setStatus('Failed to activate native blocking');
       }
+      return success;
     }
+
+    _setStatus('No active blocking session');
+    return false;
+  }
+
+  void _setStatus(String message) {
+    if (!mounted || message == _statusMessage) return;
+    setState(() => _statusMessage = message);
   }
 
   Future<void> _startCountdown() async {
     final schedule = await _storageService.getDailySchedule();
     if (schedule != null) {
-      _updateScheduleCountdown(schedule.startMinutes, schedule.endMinutes);
+      _schedule = ScheduleWindow(
+        startMinutes: schedule.startMinutes,
+        endMinutes: schedule.endMinutes,
+      );
+      _updateScheduleCountdown();
+      _timer?.cancel();
       _timer = Timer.periodic(
         const Duration(seconds: 1),
-        (_) => _updateScheduleCountdown(
-          schedule.startMinutes,
-          schedule.endMinutes,
-        ),
+        (_) => _updateScheduleCountdown(),
       );
       return;
     }
-    final endTime = await _storageService.getEndTime();
-    if (endTime == null) return;
 
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      final now = DateTime.now();
-      if (now.isAfter(endTime)) {
-        timer.cancel();
-        _onTimeUp();
-      } else if (mounted) {
-        setState(() {
-          _timeLeft = endTime.difference(now);
-        });
-      }
-    });
+    final status = await NativeService.getBlockingStatus();
+    final DateTime? target;
+    if (status.isActive) {
+      target = DateTime.now().add(status.timeLeft);
+    } else {
+      target = await _storageService.getEndTime();
+    }
+    if (target == null) return;
+    _startTicker(target);
   }
 
-  void _updateScheduleCountdown(int startMinutes, int endMinutes) {
+  void _startTicker(DateTime target) {
+    _timer?.cancel();
+
+    void update() {
+      final remaining = target.difference(DateTime.now());
+      if (remaining <= Duration.zero) {
+        _timer?.cancel();
+        _timer = null;
+        _timeLeft.value = Duration.zero;
+        _endSession();
+        return;
+      }
+      _timeLeft.value = remaining;
+    }
+
+    update();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => update());
+  }
+
+  Future<void> _syncWithNative() async {
+    final schedule = await _storageService.getDailySchedule();
+    if (schedule != null) {
+      return;
+    }
+
+    final status = await NativeService.getBlockingStatus();
+    if (!mounted) return;
+    if (status.isActive) {
+      _startTicker(DateTime.now().add(status.timeLeft));
+      return;
+    }
+
+    // The native session ended while the app was in the background (expiry,
+    // force-stop, service failure). Do not keep claiming it is active.
+    _nativeBlockingStarted = false;
+    _timer?.cancel();
+    _timer = null;
+    await _storageService.saveEndTime(null);
+    await _storageService.saveWholeDeviceMode(false);
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const TimerScreen()),
+      (_) => false,
+    );
+  }
+
+  void _updateScheduleCountdown() {
+    final schedule = _schedule;
+    if (schedule == null) return;
     final now = DateTime.now();
-    final currentMinutes = now.hour * 60 + now.minute;
-    final start = DateTime(
-      now.year,
-      now.month,
-      now.day,
-      startMinutes ~/ 60,
-      startMinutes % 60,
+    final target = schedule.nextBoundary(now);
+    final inWindow = schedule.contains(now);
+    _timeLeft.value = target.difference(now);
+    _setStatus(
+      inWindow
+          ? 'Daily schedule is blocking selected apps'
+          : 'Next daily block starts at ${_formatClock(schedule.startMinutes)}',
     );
-    var end = DateTime(
-      now.year,
-      now.month,
-      now.day,
-      endMinutes ~/ 60,
-      endMinutes % 60,
-    );
-    if (endMinutes <= startMinutes) {
-      end = end.add(const Duration(days: 1));
-    }
-    var target = end;
-    final inWindow = startMinutes < endMinutes
-        ? currentMinutes >= startMinutes && currentMinutes < endMinutes
-        : currentMinutes >= startMinutes || currentMinutes < endMinutes;
-    if (!inWindow) {
-      target = currentMinutes < startMinutes
-          ? start
-          : start.add(const Duration(days: 1));
-    }
-    if (mounted) {
-      setState(() {
-        _timeLeft = target.difference(now);
-        _statusMessage = inWindow
-            ? 'Daily schedule is blocking selected apps'
-            : 'Next daily block starts at ${_formatClock(startMinutes)}';
-      });
-    }
   }
 
   String _formatClock(int minutes) {
@@ -234,7 +308,10 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
     return '$displayHour:${minute.toString().padLeft(2, '0')} $period';
   }
 
-  void _onTimeUp() async {
+  Future<void> _endSession() async {
+    _timer?.cancel();
+    _timer = null;
+    await _storageService.clearDailySchedule();
     await _storageService.saveEndTime(null);
     await _storageService.saveWholeDeviceMode(false);
     await NativeService.stopBlocking();
@@ -246,10 +323,34 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
     );
   }
 
+  Future<void> _confirmEndSchedule() async {
+    final shouldEnd = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('End the daily schedule?'),
+        content: const Text(
+          'Selected apps will stop being blocked automatically. You can start '
+          'a new schedule from the home screen.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep blocking'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('End schedule'),
+          ),
+        ],
+      ),
+    );
+    if (shouldEnd == true) await _endSession();
+  }
+
   String _formatDuration(Duration duration) {
     String twoDigits(int n) => n.toString().padLeft(2, '0');
-    String twoDigitMinutes = twoDigits(duration.inMinutes.remainder(60));
-    String twoDigitSeconds = twoDigits(duration.inSeconds.remainder(60));
+    final twoDigitMinutes = twoDigits(duration.inMinutes.remainder(60));
+    final twoDigitSeconds = twoDigits(duration.inSeconds.remainder(60));
     return "${twoDigits(duration.inHours)}:$twoDigitMinutes:$twoDigitSeconds";
   }
 
@@ -257,6 +358,7 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
+    _timeLeft.dispose();
     super.dispose();
   }
 
@@ -322,13 +424,16 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
                       curve: Curves.easeOutBack,
                       builder: (context, scale, child) =>
                           Transform.scale(scale: scale, child: child),
-                      child: Text(
-                        _formatDuration(_timeLeft),
-                        style: const TextStyle(
-                          fontSize: 48,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF03DAC6),
-                          fontFamily: 'monospace',
+                      child: ValueListenableBuilder<Duration>(
+                        valueListenable: _timeLeft,
+                        builder: (context, timeLeft, _) => Text(
+                          _formatDuration(timeLeft),
+                          style: const TextStyle(
+                            fontSize: 48,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF03DAC6),
+                            fontFamily: 'monospace',
+                          ),
                         ),
                       ),
                     ),
@@ -359,17 +464,16 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
                     const SizedBox(height: 12),
                     _buildInfoRow(
                       '✓',
-                      'Custom Accessibility Service monitors app launches',
+                      'Accessibility service detects app launches',
                     ),
                     _buildInfoRow(
                       '✓',
-                      'Foreground Service ensures persistent blocking',
+                      'Foreground service keeps the session and ends it on time',
                     ),
                     _buildInfoRow(
                       '✓',
-                      'Blocking Activity displays when blocked app is opened',
+                      'Opening a blocked app returns you to the home screen',
                     ),
-                    _buildInfoRow('✓', 'Automatic home screen redirect'),
                   ],
                 ),
               ),
@@ -396,12 +500,21 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
                     ),
                     SizedBox(height: 8),
                     Text(
-                      'The Accessibility Service must remain enabled for the blocking to work effectively. Do not disable it in your device settings.',
+                      'The Accessibility Service must remain enabled for the blocking to work. If you turn it off, apps will no longer be blocked.',
                       style: TextStyle(fontSize: 13, color: Colors.orange),
                     ),
                   ],
                 ),
               ),
+              if (_schedule != null) ...[
+                const SizedBox(height: 20),
+                Center(
+                  child: TextButton(
+                    onPressed: _confirmEndSchedule,
+                    child: const Text('End daily schedule'),
+                  ),
+                ),
+              ],
               const SizedBox(height: 24),
             ],
           ),
