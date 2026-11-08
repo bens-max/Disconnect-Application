@@ -1,5 +1,11 @@
 # Focus Blocker - Setup & Next Steps
 
+> **Historical design note (last reviewed November 2026).** The manual test
+> steps below refer to a `BlockingActivity` screen that the app never launches
+> and to a `FlutterAccessibilityService` plugin that has been removed. The
+> current setup, build and test commands are in `README.md`; verified findings
+> and limitations are in `REVIEW_REPORT.md`.
+
 ## 🚀 Getting Started
 
 This guide will help you set up and verify the complete native Android integration for the Focus Blocker app.

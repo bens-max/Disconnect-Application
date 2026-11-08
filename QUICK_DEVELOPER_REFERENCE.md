@@ -1,5 +1,11 @@
 # Focus Blocker - Quick Developer Reference
 
+> **Historical design note (last reviewed November 2026).** The file table,
+> permission checklist and performance numbers below are outdated. There is no
+> `BlockingActivity` flow, no usage-stats permission, and no 1-second blocking
+> timer in the shipped app. Use `README.md`, `REVIEW_REPORT.md` and the source
+> code as the source of truth.
+
 ## Files Created/Modified
 
 ### Android Files (Kotlin)

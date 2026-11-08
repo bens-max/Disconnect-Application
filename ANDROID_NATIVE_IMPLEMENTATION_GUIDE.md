@@ -1,5 +1,13 @@
 # Focus Blocker - Native Android Integration Guide
 
+> **Historical design note (last reviewed November 2026).** Several components
+> described here are not part of the current implementation: `BlockingActivity`
+> is dead code, `UsageStatsUtil` is unused, the app no longer requests
+> `QUERY_ALL_PACKAGES`, `SYSTEM_ALERT_WINDOW`, `PACKAGE_USAGE_STATS` or
+> `DISABLE_KEYGUARD`, and the accessibility service neither retrieves window
+> content nor filters key events. See `README.md` and `REVIEW_REPORT.md` for the
+> verified architecture and permission list.
+
 ## Overview
 
 This document provides a complete implementation guide for the Focus Blocker app's native Android integration. The solution uses Android's Accessibility Service, Usage Stats, MethodChannel communication between Flutter and Android, a Foreground Service for persistence, and a custom Blocking Activity.

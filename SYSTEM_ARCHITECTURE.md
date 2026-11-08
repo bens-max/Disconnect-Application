@@ -1,5 +1,13 @@
 # Focus Blocker - Complete System Architecture
 
+> **Historical design note (last reviewed November 2026).** This document
+> describes an early design, not the shipped implementation. In particular,
+> `BlockingActivity` is not launched (the app returns to the home screen),
+> the accessibility service no longer receives `TYPE_WINDOWS_CHANGED` or key
+> events, and `AppBlockingService` no longer polls every second. The
+> performance tables below were never measured. See `README.md` and
+> `REVIEW_REPORT.md` for the current behaviour and evidence.
+
 ## 🏗️ System Overview
 
 Focus Blocker implements a multi-layered native Android blocking system with Flutter integration, ensuring reliable app blocking through redundant mechanisms and proper permission handling.
