@@ -1,169 +1,193 @@
 # Disconnect Android lag and code review
 
-Review date: 2026-11-08. Branch: `fix/review-and-lag`.
+Review date: 2026-11-08; final verification: 2026-11-12. Branch: `fix/review-and-lag`.
+Baseline commit: `3196ae0`. Fix commits: `e535a6b`, `4efc112`, `c39b633`, `f5a8545`, plus the test-tracking and report commits listed at the end.
+
+Measurement environment: Android 14 emulator (API 34, `google_apis`, x86_64, AVD `disconnect-test`, headless SwiftShader), Flutter 3.44.1 / Dart 3.12.1, Linux host. No physical phone or OEM ROM was available.
 
 ## Executive summary
 
-- **Confirmed:** the old accessibility configuration subscribed to window content changes, requested window content and interactive-window data, and requested key-event filtering. The revised config accepts only window-state changes and declines content/key capabilities; the service handles package names in memory.
-- **Confirmed:** the former foreground service tick and notification update loop has been replaced by a one-shot `Handler` boundary callback and a system-rendered notification chronometer.
-- These changes remove clear sources of unnecessary system-wide event handling and periodic app work. **They do not prove a measured reduction in other apps' jank:** this environment has no connected device/emulator.
-- **Confirmed:** `flutter analyze` reports no issues, `flutter test` passes (2 tests), and `flutter build apk --debug` succeeds.
-- **Confirmed:** merged manifest has one custom accessibility service, one special-use foreground service and the boot/update receiver; the Flutter accessibility plugin service and broad package permissions are absent.
-- **High:** `BlockingActivity` remains in source but is no longer used. Blocked launches go to Home (whole-device sessions request screen lock); the user does not see the documented full-screen countdown wall.
-- **High:** Flutter still stores a second copy of session state in `SharedPreferences`; native is treated as authoritative for active status, but the user-selected app list/schedule/duration are also read from Flutter prefs.
-- **Medium:** target SDK is 36, while release signing, store policy acceptance for `specialUse`, and device/OEM behavior have not been verified.
-- **Medium:** current tests cover two startup form cases only; native session timing, expiry, reboot, permissions, exemptions and real app interception lack automated/device tests.
+- **Most likely root cause of the system-wide lag:** the accessibility service was configured to receive every window change (including `TYPE_WINDOWS_CHANGED`), retrieve window content and interactive windows, and filter every hardware key event. It only needs the foreground package name. Android therefore did extra work for this app on every window and key event across the device.
+- **Second confirmed cause:** `AppBlockingService` ran a `java.util.Timer` every second. In daily mode it wrote `is_blocking_active` to SharedPreferences every second and called `NotificationManager.notify()` every second, and the notification channel was `IMPORTANCE_HIGH` with vibration and lights.
+- **Also fixed:** a whole-device screen-on path started a foreground service from a broadcast without calling `startForeground()` on that path (Android 8+ background-start failure); the whole-device allowlist did not exempt Settings, IMEs, the phone/dialer, or the user's actual launcher; broad/unused permissions and an exported legacy activity were present.
+- **Measured on the emulator:** accessibility capabilities dropped from 9 to 0; event types from `TYPE_WINDOW_STATE_CHANGED + TYPE_WINDOWS_CHANGED` to only `TYPE_WINDOW_STATE_CHANGED`; process CPU over 120 s dropped from 0.24 CPU-seconds to 0 (`<0.01 CPU-s`); notification importance dropped from 4 (HIGH) to 2 (LOW), vibration/lights off, and the notification text stopped changing every second.
+- **Not proven:** the exact percentage reduction in accessibility events and the effect on another app's frame jank. The post-fix counter run was interrupted when the test host restarted, so those numbers are left as "not measured" rather than inferred.
+- **Top other findings:** duplicate Flutter/native session state; notification-permission denial not surfaced; daily schedule keeps a foreground service alive all day; Handler-based expiry does not fire during deep sleep; legacy `BlockingActivity` is dead code; the app picker hides preinstalled apps; tests and release signing are incomplete.
 
 ## What the code actually does
 
-`main()` initializes the MethodChannel, loads app-picker/schedule/session fields from Flutter `SharedPreferences`, then queries native status to choose the initial screen ([main.dart](/home/benson-cherian-suresh/Development/Disconnect-Application/lib/main.dart:8)). `TimerScreen` saves a requested duration/scope and routes to `ActiveLockScreen`; app selection uses `installed_apps`, retrieves launchable app metadata without icons initially, then lazily requests up to 40 icons in batches ([app_selection_screen.dart](/home/benson-cherian-suresh/Development/Disconnect-Application/lib/screens/app_selection_screen.dart:36)). The active screen presents an accessibility disclosure, asks native code whether this app's accessibility service is enabled, starts a one-time session or schedule, and refreshes native status on resume ([active_lock_screen.dart](/home/benson-cherian-suresh/Development/Disconnect-Application/lib/screens/active_lock_screen.dart:34)). Its visible countdown uses a one-second Dart timer; this timer is only active while the Flutter screen is mounted.
+`main()` initializes the native MethodChannel, reads Flutter-side app/schedule/session preferences, asks the native layer for the authoritative active status, and restores a saved daily schedule if one exists (`lib/main.dart:8-58`). The timer form saves duration/scope and opens `ActiveLockScreen` (`lib/screens/timer_screen.dart:73-122`). The picker loads launchable apps without icons, then lazily fetches icons for at most 40 apps in batches (`lib/screens/app_selection_screen.dart:36-102`).
 
-`MainActivity` handles `com.antigravity.focusblocker/native`, stores native session values, checks the enabled service via `AccessibilityManager`, requests Android 13+ notification permission, and starts/stops `AppBlockingService` ([MainActivity.kt](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/MainActivity.kt:31)). Native preferences use `BlockingState.PREFS_NAME`; the accessibility service copies relevant values into fields through a preference listener and at service connection ([BlockingState.kt](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/BlockingState.kt:12), [FocusBlockerAccessibilityService.kt](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/FocusBlockerAccessibilityService.kt:117)). The event handler ignores non-window-state events, debounces repeat package names for 500 ms, exempts its package, system, launchers, IMEs and dialers, then sends blocked app launches Home. Whole-device mode invokes the global lock action (or Home before API 28) ([FocusBlockerAccessibilityService.kt](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/FocusBlockerAccessibilityService.kt:164)). It does not launch `BlockingActivity`.
+`ActiveLockScreen` shows an accessibility disclosure, checks this app's accessibility service through the native channel, starts a one-time or daily session, and refreshes native status on resume (`lib/screens/active_lock_screen.dart:54-75`, `129-209`, `262-287`). Its 1 Hz countdown updates only a `ValueNotifier` read by a small `ValueListenableBuilder`; the timer is cancelled in `dispose()` (`lib/screens/active_lock_screen.dart:216-287`, `357-363`, `427-438`).
 
-`AppBlockingService` promotes itself to foreground, displays a low-importance silent notification with a system chronometer, and schedules one callback for session/schedule boundary. It does not poll each second; daily schedules re-arm at each boundary. `BootCompletedReceiver` re-anchors elapsed time on boot and starts the service for a still-valid session ([AppBlockingService.kt](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/AppBlockingService.kt:55), [BootCompletedReceiver.kt](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/BootCompletedReceiver.kt:14)). The active session expiry uses elapsed realtime while running and persisted wall time for reboot recovery.
+`MainActivity` is the MethodChannel endpoint. It validates requests, writes native preferences, starts/stops `AppBlockingService`, checks accessibility with `AccessibilityManager`, and requests `POST_NOTIFICATIONS` on Android 13+ (`android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/MainActivity.kt:31-138`, `140-153`, `214-238`).
+
+`AppBlockingService` owns the session and notification. It does not tick: it uses `NotificationCompat` with `setUsesChronometer(true)`, `setChronometerCountDown(true)` and `setWhen(endTime)` so SystemUI renders the countdown, and schedules one `Handler` callback for the next session end or daily boundary (`AppBlockingService.kt:21-28`, `198-227`, `250-308`). The channel is `IMPORTANCE_LOW`, silent, no vibration/lights; the old high-importance channel is deleted (`AppBlockingService.kt:315-334`). `BootCompletedReceiver` re-anchors elapsed time using the wall-clock end time and restarts a still-valid session (`BootCompletedReceiver.kt:14-78`). `ScreenOnReceiver` no longer starts a service; during whole-device mode it asks the already-connected accessibility service to lock, or sets a flag for the next connection (`ScreenOnReceiver.kt:18-39`).
+
+`FocusBlockerAccessibilityService` is event-driven. The XML and `setServiceInfo` request only `TYPE_WINDOW_STATE_CHANGED`, `feedbackGeneric`, `flagDefault`, `canRetrieveWindowContent=false`, no key filtering, and a 100 ms timeout (`android/app/src/main/res/xml/accessibility_service_config.xml:8-14`; `FocusBlockerAccessibilityService.kt:144-150`). Values are cached in memory and refreshed only by `OnSharedPreferenceChangeListener` (`FocusBlockerAccessibilityService.kt:117-130`, `199-219`). The hot path returns immediately for non-state events, debounces the same package for 500 ms, exempts this app, system UI, Settings, launchers, IMEs, dialers and `android`, then calls `performGlobalAction(GLOBAL_ACTION_HOME)` or `GLOBAL_ACTION_LOCK_SCREEN` (`FocusBlockerAccessibilityService.kt:164-192`, `61-115`, `236-244`). It does not launch `BlockingActivity`.
 
 ## Documentation claims versus implementation
 
 | Document claim | Reality and evidence |
 |---|---|
-| `SYSTEM_ARCHITECTURE.md` describes real-time content/window events, key interception and launching `BlockingActivity` (e.g. lines 53–75, 186–275). | Historical only. Config accepts `typeWindowStateChanged`; service sets `flags=0`, never overrides `onKeyEvent`, and calls `performGlobalAction` ([XML](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/res/xml/accessibility_service_config.xml:8), [service](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/FocusBlockerAccessibilityService.kt:144)). Manifest labels `BlockingActivity` legacy/unlaunched ([manifest](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/AndroidManifest.xml:56)). README and the architecture document’s new notice now disclose this. |
-| Architecture/implementation guides say service timer checks each second, notification updates continuously, and activity updates each 500 ms (architecture lines 282–304, 464–514; guide lines 71–100). | Not current behavior. Service only schedules a boundary callback and updates notification on state/boundary ([AppBlockingService.kt](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/AppBlockingService.kt:198)); `BlockingActivity` has no timer implementation. Historical guides now warn readers in their opening notice. |
-| Architecture performance table gives numeric CPU, memory and battery claims and calls the app production-ready (architecture lines 522–545, 631). | Unsupported measurements; no device was available. The architecture notice now labels the values unmeasured. Release signing remains debug-key based ([app Gradle](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/build.gradle.kts:33)). |
-| Several historical guides list `BIND_ACCESSIBILITY_SERVICE`, `QUERY_ALL_PACKAGES`, `SYSTEM_ALERT_WINDOW`, `PACKAGE_USAGE_STATS`, and `DISABLE_KEYGUARD` as manifest permissions. | Current merged manifest has no such uses-permission declarations. Binding is on the service element; broad package permissions are removed. UsageStatsUtil exists but is not called by Dart or native blocking paths. |
-| Old flow diagrams say accessibility reads preferences on every event and foreground service prevents force-stop. | Current service reads cached values on connection/preference change; force-stop is not prevented. README now explicitly documents force-stop behavior. |
-| `SETUP_AND_NEXT_STEPS.md` says minimum API 26 and lists an active plugin accessibility service. | Actual merged manifest has `minSdkVersion=24`; only the custom service is merged. Setup guide now identifies itself as historical. |
-| `QUICK_DEVELOPER_REFERENCE.md` lists files and operations from the earlier architecture. | It remains historical; implementation-dependent descriptions should be treated as stale. README points to current code/report. |
-| README says no network permission in release. | Merged debug manifest includes INTERNET from Flutter's debug manifest; release source manifests do not declare it. Release merge was not built/inspected in this task, so release absence is inferred from source, not measured from a release APK. |
+| `SYSTEM_ARCHITECTURE.md` describes a 500 ms `BlockingActivity` countdown, HOME/BACK key interception and window content events (historical sections around lines 53-75 and 186-275). | Historical only. `BlockingActivity` is unexported and never started; it still has empty `onBackPressed`/`onKeyDown` overrides (`AndroidManifest.xml:61-66`; `BlockingActivity.kt:100-112`). The service receives only `TYPE_WINDOW_STATE_CHANGED` and never overrides `onKeyEvent` (`accessibility_service_config.xml:9`; `FocusBlockerAccessibilityService.kt:144-150`). |
+| Architecture/implementation guides say the foreground service checks every second and updates the notification continuously; the blocking screen refreshes every 500 ms. | Not current. The service has no timer loop and updates the notification only on start/state boundary (`AppBlockingService.kt:198-227`, `250-308`). `BlockingActivity` has no countdown implementation. The documents now carry historical-design banners. |
+| Architecture performance table gives CPU/memory/battery percentages and calls the app production-ready. | Never measured; no physical-device data. The banner now says the tables are unmeasured. Release signing still uses the debug key (`android/app/build.gradle.kts:33-38`). |
+| Guides list `BIND_ACCESSIBILITY_SERVICE`, `QUERY_ALL_PACKAGES`, `SYSTEM_ALERT_WINDOW`, `PACKAGE_USAGE_STATS` and `DISABLE_KEYGUARD` as manifest permissions. | True for the baseline commit, false now. `BIND_ACCESSIBILITY_SERVICE` belongs on the service element; the broad permissions and `REQUEST_DELETE_PACKAGES` are removed (`AndroidManifest.xml:21-26`, `75-85`). The current release merged manifest contains only `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS` and `RECEIVE_BOOT_COMPLETED` (plus AndroidX's generated receiver permission). |
+| Flows say accessibility reads SharedPreferences on every event and the foreground service prevents force-stop. | The current service reads preferences only on connection/change. A foreground service does **not** prevent force-stop; `README.md:107-123` now says so. |
+| `SETUP_AND_NEXT_STEPS.md` says minimum API 26 and lists the plugin accessibility service. | Actual merged manifest is minSdk 24; the plugin is removed and only the custom service remains. The setup guide is now labelled historical. |
+| `QUICK_DEVELOPER_REFERENCE.md` lists the earlier file set and a 1-second blocking timer. | Historical; the banners point readers to `README.md` and this report. |
+| README says the release build has no network permission. | Verified in the release merged manifest: no `INTERNET`. The debug manifest does include `INTERNET` from Flutter's debug manifest. Release signing and store policy are still unverified. |
 
 ## Findings
 
 | ID | Severity | Confidence | File:line | What is wrong | Why it matters | Fix | Status |
 |---|---|---|---|---|---|---|---|
-| F1 | High | Confirmed | [accessibility_service_config.xml:8](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/res/xml/accessibility_service_config.xml:8) | Previous config requested content/window events, content retrieval, interactive windows and key filtering. | Sends unnecessary work through Android accessibility/input paths; plausible source of lag. | Restrict to window-state events, generic feedback, no content retrieval, default flags; native service also sets these explicitly. | Fixed in working tree |
-| F2 | High | Confirmed | [FocusBlockerAccessibilityService.kt:117](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/FocusBlockerAccessibilityService.kt:117) | Previous per-event preference reads were costly. | Repeated preference access and set copies can amplify the event firehose. | Refresh cached state from `OnSharedPreferenceChangeListener`; 500 ms same-package debounce; no event-path logging in release. | Fixed in working tree |
-| F3 | High | Confirmed | [AppBlockingService.kt:198](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/AppBlockingService.kt:198) | Previous 1-second service loop repeatedly updated notification/state. | Persistent wakeups and SystemUI work while idle. | Single `Handler` boundary callback and system chronometer; cancel callback on stop/destroy. | Fixed in working tree |
-| F4 | Medium | Confirmed | [AndroidManifest.xml:5](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/AndroidManifest.xml:5) | Android 14+ requires a service type and type permission for FGS types. | Missing declaration may reject foreground startup. | Declares `specialUse`, `FOREGROUND_SERVICE_SPECIAL_USE`, subtype property; confirm store/platform eligibility before publishing. | Fixed; policy unverified |
-| F5 | Medium | Confirmed | [BootCompletedReceiver.kt:37](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/BootCompletedReceiver.kt:37) | Boot receiver starts FGS and handles wall-to-elapsed re-anchor. Device/OEM scheduling and special-use boot allowance were not exercised. | Recovery may vary by OS/OEM; force-stop prevents normal recovery until app is opened. | Keep explicit manual device validation in checklist; don't claim verified reliability. | Proposed validation |
-| F6 | Medium | Confirmed | [storage_service.dart:3](/home/benson-cherian-suresh/Development/Disconnect-Application/lib/services/storage_service.dart:3) | UI persists selected apps, schedule and end time separately from native prefs. | Copies can drift after native expiry, force-stop, or partial failure. | Native status is authoritative for active state; future change should make native API own selection/schedule too. | Proposed |
-| F7 | Medium | Confirmed | [BlockingActivity.kt:16](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/BlockingActivity.kt:16) | Legacy fullscreen blocking activity is unused and still contains obsolete Back/Home overrides and a window flag. | Misleads maintainers and docs; if reconnected, would have stale behavior. | Leave unlaunched/unexported; remove after deciding whether the home redirect is the desired product behavior. | Proposed |
-| F8 | Medium | Confirmed | [MainActivity.kt:130](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/MainActivity.kt:130) | Notification permission request occurs at initialization; result is not used to gate session start. | On Android 13+, user may deny visible notification while the foreground task is still active, reducing transparency. | Add health/status UI for notification permission; retain FGS notification requirement handling. | Proposed |
-| F9 | Medium | Confirmed | [app/build.gradle.kts:22](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/build.gradle.kts:22) | Application id is `com.antigravity.focusblocker.focus_blocker` while public/project name is Disconnect and Dart package is `focus_blocker`. | Identity is confusing; changing installed app id is a migration, not a safe cleanup. | Document; rename only with explicit release/migration plan. | Proposed |
-| F10 | Medium | Confirmed | [test/widget_test.dart:8](/home/benson-cherian-suresh/Development/Disconnect-Application/test/widget_test.dart:8) | Only two widget startup tests exist. | Doesn't cover session logic or native Android behavior. | Add pure schedule/expiry/exemption tests and device checklist. | Proposed |
-| F11 | Low | Confirmed | [UsageStatsUtil.kt:15](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/UsageStatsUtil.kt:15) | Usage stats utility is unused; no `PACKAGE_USAGE_STATS` permission appears in merged manifest. | The class can mislead future usage-stat feature work; no current runtime cost from it. | Remove when implementing usage-based features or add permission flow then. | Proposed |
-| F12 | Low | Confirmed | [pubspec.yaml:20](/home/benson-cherian-suresh/Development/Disconnect-Application/pubspec.yaml:20) | `installed_apps` and `shared_preferences_android` trigger Flutter's Kotlin Gradle Plugin migration warning. | Future Flutter versions may fail to build until plugins/app migrate. | Upgrade when compatible versions are available; current build succeeds with warning. | Proposed |
-| F13 | Low | Confirmed | [app_selection_screen.dart:64](/home/benson-cherian-suresh/Development/Disconnect-Application/lib/screens/app_selection_screen.dart:64) | App metadata loads through the plugin; first 40 icons are fetched in batches, not via a background isolate. | Large app lists may still create UI/memory work; no profile measurement. | Profile picker on a low-end phone; paginate/lazy icon work if needed. | Proposed |
-| F14 | Low | Confirmed | [AppBlockingService.kt:233](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/AppBlockingService.kt:233) | `specialUse` subtype is descriptive but does not by itself establish policy approval or exact use-case eligibility. | Android/Play review may reject an inappropriate FGS type/use. | Verify current Google Play/Android requirements before distribution. | Proposed |
-
-### Manifest and permissions
-
-The built debug merged manifest is `build/app/intermediates/merged_manifests/debug/processDebugManifest/AndroidManifest.xml`. It reports min SDK 24 and target SDK 36. Permissions in that manifest: `INTERNET` (from Flutter's debug manifest), `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS`, `RECEIVE_BOOT_COMPLETED`, and AndroidX's generated signature `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`. There is no `BIND_ACCESSIBILITY_SERVICE` uses-permission, `QUERY_ALL_PACKAGES`, `REQUEST_DELETE_PACKAGES`, `SYSTEM_ALERT_WINDOW`, `PACKAGE_USAGE_STATS`, or `DISABLE_KEYGUARD` permission. The service declares `android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"`.
-
-App components in the merged debug manifest:
-
-- Activities: exported launcher `MainActivity`; unexported legacy `BlockingActivity`.
-- Services: exported system-bound `FocusBlockerAccessibilityService`; unexported `AppBlockingService` with `foregroundServiceType="specialUse"`.
-- Receivers: exported `BootCompletedReceiver`; AndroidX exported `ProfileInstallReceiver` protected by `android.permission.DUMP`.
-- Provider: unexported AndroidX `InitializationProvider`.
-
-`POST_NOTIFICATIONS` is requested at runtime on Android 13+ (MainActivity lines 130–138); user denial isn't surfaced in a health check. `startForegroundService()` is used for Android O+ (MainActivity lines 214–219; boot receiver lines 80–86), and service creates its notification channel in `onCreate` before calls to `startForeground`. BIND permission placement and the two app-facing exported flags were corrected. `BootCompletedReceiver` is exported because it receives system broadcasts and accepts only explicit expected actions in code. Direct boot is not supported: receiver listens to `BOOT_COMPLETED`, not `LOCKED_BOOT_COMPLETED`, and preferences are credential-protected.
+| F1 | High | Confirmed | `android/app/src/main/res/xml/accessibility_service_config.xml:9-12` (current); baseline `3196ae0` config | Baseline requested `typeWindowsChanged` in addition to state changes, `canRetrieveWindowContent=true`, `canRequestFilterKeyEvents=true`, and flags including interactive windows, not-important views, web accessibility, view IDs and IME. | Android did extra accessibility/input work on every window and key event system-wide; this is a plausible direct cause of the "app is slowing down your phone" warning. | Only `typeWindowStateChanged`, generic feedback, default flags, no content retrieval, no key filtering. | Fixed (`e535a6b`) |
+| F2 | High | Confirmed | Baseline `FocusBlockerAccessibilityService.kt` in `3196ae0`; current `FocusBlockerAccessibilityService.kt:144-166` | Baseline service also registered `TYPE_WINDOW_STATE_CHANGED \| TYPE_WINDOWS_CHANGED`, with `FLAG_RETRIEVE_INTERACTIVE_WINDOWS \| FLAG_REQUEST_FILTER_KEY_EVENTS` and a 50 ms timeout. | Every additional window event woke the app's main thread; key filtering adds synchronous input latency. The block decision only needs the package name. | One event type, flags 0, 100 ms timeout, in-memory state. | Fixed (`e535a6b`) |
+| F3 | High | Confirmed | Baseline `AppBlockingService.kt:213-233`, `255-335` | A `Timer` ran every second. In daily mode it wrote `is_blocking_active` every second and called `notify()` every second; the channel was `IMPORTANCE_HIGH` with vibration and lights. | Continuous wakeups and SystemUI notification rebuilds while idle; visible countdown changed every second and could buzz/light the screen. | Removed the loop; system chronometer; one Handler callback; low-importance silent channel; old channel deleted. | Fixed (`e535a6b`) |
+| F4 | High | Confirmed | Baseline `AndroidManifest.xml:2-17`, `51-56`; current `AndroidManifest.xml:21-26`, `61-66` | Baseline requested `BIND_ACCESSIBILITY_SERVICE` as a uses-permission, plus `QUERY_ALL_PACKAGES`, `SYSTEM_ALERT_WINDOW`, `PACKAGE_USAGE_STATS` and `DISABLE_KEYGUARD`; `BlockingActivity` was exported. | Incorrect permission model, unnecessary Play review burden and a launchable legacy activity that other apps could open. | Removed the uses-permissions; binding is on the service; `QUERY_ALL_PACKAGES`/`REQUEST_DELETE_PACKAGES` removed with `tools:node="remove"`; legacy activity unexported. | Fixed (`e535a6b`) |
+| F5 | High | Confirmed | Baseline `FocusBlockerAccessibilityService.kt:34-47`; current `FocusBlockerAccessibilityService.kt:61-115`, `184` | Baseline whole-device allowlist was a short hard-coded launcher list. It did not include Settings, enabled IMEs, the phone/dialer, the default dialer or an OEM launcher not in the list. | A whole-device session could lock the user out of the home screen, keyboard, Settings (the only place to disable the service) or emergency calling. | Added `android`, Settings, phone/dialer/emergency, permission/package installers; resolves all HOME activities, enabled IMEs and the default dialer at runtime. | Fixed; user-editable exemptions remain roadmap (`e535a6b`) |
+| F6 | High | Confirmed | Baseline `ScreenOnReceiver.kt`; baseline `AppBlockingService.kt:45-72` | Screen-on called `startForegroundService(ACTION_RELOCK_SCREEN)`; that branch called `relockScreenIfNeeded()` but never `startForeground()` within the 5 s limit. | On Android 8+, starting this path from a background broadcast can fail with an ANR/crash and never re-lock. | Removed the service start; the receiver uses the connected accessibility service, or sets a flag consumed on the next connection (`ScreenOnReceiver.kt:18-39`). | Fixed (`e535a6b`) |
+| F7 | Medium | Confirmed | `lib/services/storage_service.dart:3-67`; `lib/screens/active_lock_screen.dart:129-209` | Flutter stores selected apps, end time, schedule and whole-device mode separately from native preferences; native is authoritative only for active status. | State can drift after native expiry, force-stop, update or partial failure; the UI can show stale setup data. | Native active status is now the source of truth; next step is a native repository/API for selection and schedule too. | Partially fixed; migration proposed |
+| F8 | Medium | Confirmed | `MainActivity.kt:130-138`; `ActiveLockScreen` status card | `POST_NOTIFICATIONS` is requested at startup, but denial is never surfaced or used to gate a session. | On Android 13+ the foreground service runs with no visible notification, reducing transparency and user trust. | Add a health/status row and explain that the session still runs but the notification is hidden. | Proposed |
+| F9 | Medium | Confirmed | `AppBlockingService.kt:108-129`, `221-227` | A daily schedule starts a foreground service immediately and keeps it alive all day, including outside the focus window; the notification says "Next block starts at …". | A persistent foreground service and notification all day is avoidable battery/UX cost and can trigger OEM battery heuristics. | Stop the service outside the window and re-arm with an alarm/WorkManager, or keep the FGS only while blocking is active. | Proposed |
+| F10 | Medium | Likely | `AppBlockingService.kt:216-227`; `BlockingState.kt:70-81` | Expiry uses `Handler.postDelayed`, which is based on uptime and does not advance during deep sleep; the accessibility service uses elapsed realtime and stops blocking correctly, but the service/notification cleanup can be late. | A session can look active in the notification after it has actually expired, and the FGS can stay alive longer than needed. | Add an `AlarmManager`/WorkManager backstop and reconcile on wake/screen-on. | Proposed |
+| F11 | Low | Confirmed | `BlockingState.kt:25-28`; `FocusBlockerAccessibilityService.kt:221-234` | In daily mode every window-state event calls `currentMinutes()`, which allocates a `Calendar`. | Small per-event allocation on the main thread; not the primary cause, but unnecessary in the hot path. | Cache the current window/boundary or compare epoch millis without `Calendar` per event. | Proposed |
+| F12 | Medium | Confirmed | `BlockingActivity.kt:16-112`; `AndroidManifest.xml:61-66` | The legacy full-screen activity remains in source and the manifest but is never launched; it contains obsolete BACK/HOME overrides and a fullscreen flag. | Dead code misleads maintainers and can be accidentally reconnected. | Remove it, or deliberately rebuild a blocking screen with a lifecycle-aware countdown. | Proposed |
+| F13 | Medium | Confirmed | `lib/screens/app_selection_screen.dart:39-42` | `InstalledApps.getInstalledApps(excludeSystemApps: true)` hides preinstalled apps. | Chrome, YouTube and some social apps are preinstalled on many phones and cannot be selected, which defeats the main use case. | Offer a "show system apps" filter that still excludes non-launchable packages; document the trade-off. | Proposed |
+| F14 | Medium | Confirmed | `test/widget_test.dart:14-32`; `test/schedule_test.dart:6-54` | Only 8 Dart tests exist (2 widget, 6 schedule); there are no Android unit/instrumented tests for session expiry, exemptions, debounce or reboot recovery. | The native hot path and session edge cases have no automated regression protection. | Add native tests and an instrumentation/manual suite; keep the schedule tests tracked in git. | Partially fixed; native tests proposed |
+| F15 | Low | Confirmed | `android/app/build.gradle.kts:22-30`, `41-49`; `pubspec.yaml:37-38` | The app uses application id `com.antigravity.focusblocker.focus_blocker` while the product is Disconnect and the Dart package is `focus_blocker`; the Gradle file has a duplicated `androidx.core` dependency. | Identity is confusing and the duplicate dependency is noise; renaming an installed app id is a migration, not a safe cleanup. | Document identity; remove the duplicate dependency; rename only with a migration plan. | Proposed |
+| F16 | Low | Confirmed | `android/app/build.gradle.kts:33-38`; `android/app/src/main/kotlin/.../UsageStatsUtil.kt:15` | Release builds still use the debug signing key, and `UsageStatsUtil` is unused (and its `getForegroundApp` returns a class name, not a package). | Cannot publish safely; dead utility may mislead future work. | Configure release signing; remove or implement usage stats behind a permission flow. | Proposed |
+| F17 | Low | Confirmed | `.gitignore` (baseline of this review); `test/schedule_test.dart` | A `/test/` ignore rule excluded the schedule tests from git, so CI would only see the widget tests. | The test suite was not actually versioned; future clones would silently lose coverage. | Removed `/test/` from `.gitignore` and added `test/schedule_test.dart`. | Fixed in this review |
+| F18 | Low | Confirmed | `FocusBlockerAccessibilityService.kt:246-259` | Reading `Settings.Secure.ENABLED_INPUT_METHODS` directly threw `SecurityException` on targetSdk 36 during emulator testing. | Opening the service could crash the app and disable blocking. | Use `InputMethodManager.enabledInputMethodList` instead. | Fixed (`e535a6b`) |
+| F19 | Low | Confirmed | `AppBlockingService.kt:250-308` (`formatTime`), daily boundary logic | Daily boundary math uses the default time zone and there is no `ACTION_TIME_CHANGED`/`ACTION_TIMEZONE_CHANGED` receiver. | After a time-zone or manual clock change, the next boundary can be wrong until the app/service is restarted. | Add a time-change receiver and reconcile the boundary. | Proposed |
+| F20 | Low | Confirmed | `pubspec.yaml:37-38` (`installed_apps`, `shared_preferences_android`) | Flutter warns that these plugins apply the Kotlin Gradle Plugin and will fail in future Flutter versions. | The build works now but will break on a future Flutter upgrade. | Migrate when plugin versions support Built-in Kotlin. | Proposed |
 
 ## Lag investigation
 
-| Hypothesis | Verdict | Evidence / quantification |
+| Hypothesis | Verdict | Evidence and quantification |
 |---|---|---|
-| H1 Event firehose | **Confirmed as prior configuration risk; current config reduced it.** | Current XML requests only `typeWindowStateChanged`; service also sets only `TYPE_WINDOW_STATE_CHANGED` ([XML:9](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/res/xml/accessibility_service_config.xml:9), [service:144](/home/benson-cherian-suresh/Development/Disconnect-Application/android/app/src/main/kotlin/com/antigravity/focusblocker/focus_blocker/FocusBlockerAccessibilityService.kt:144)). No device event rate available, so percent reduction and mean processing time are **not measured**. |
-| H2 Expensive capabilities | **Confirmed removed from current config.** | `canRetrieveWindowContent=false`, `flags=0`; no node/window traversal in event method. No `rootInActiveWindow`, `getSource()` or node traversal on hot path. |
-| H3 Key-event filtering | **Confirmed removed.** | No `canRequestFilterKeyEvents`, `FLAG_REQUEST_FILTER_KEY_EVENTS`, or service `onKeyEvent`; current accessibility flags are zero. |
-| H4 Work per event | **Confirmed reduced; residual cost remains.** | Cached in-memory set and session fields; package conversion, debounce and membership check. Preferences read in listener and service connect. A debug counter increments on each received event, but logs only every 60 seconds; no duration instrumentation/mean-time measurement. |
-| H5 Ticking service | **Confirmed old loop removed.** | One handler callback at boundary; notification built/updated on start or daily boundary, not each second. No persistent timer loop. Flutter active screen still ticks at 1 Hz while visible; it cancels timer on dispose. |
-| H6 Activity launch loop | **Ruled out for current implementation.** | Accessibility service doesn't start an activity at all; it calls Home/Lock global action. Thus no `BlockingActivity` relaunch loop. Number of attempts/minute unmeasured. |
-| H7 Duplicate service/plugin overhead | **Ruled out in built merged debug manifest.** | Exactly one app AccessibilityService appears; `flutter_accessibility_service` is removed from pubspec and no Dart event-stream subscription exists. Build directory contains stale plugin intermediates from earlier dependency state, but they are not in final merged manifest. |
-| H8 Memory pressure | **Cannot verify.** | No device/emulator attached and adb server could not start (`could not install *smartsocket* listener: Operation not permitted`). No `dumpsys meminfo`, CPU or battery stats. Debug APK build size is 168,918,657 bytes; this is not resident memory. |
-| H9 OEM behavior | **Cannot verify.** | No OEM device available. Reduced event types, removed key filtering and no service tick address plausible wakeup/CPU triggers but do not establish OEM behavior. |
+| **H1 Event firehose** | **Confirmed as the primary event-volume cause** | Baseline XML requested `typeWindowsChanged\|typeWindowStateChanged`; the service also set both event types. After the fix, `dumpsys accessibility` shows only `TYPE_WINDOW_STATE_CHANGED`. A debug counter measured **182 events in one 60 s interval** containing 40 SETTINGS/HOME cycles (26 s workload) on the baseline. The post-fix counter run was interrupted by a test-host restart, so the percentage drop is **not measured**; the configuration itself removes the extra `TYPE_WINDOWS_CHANGED` stream. |
+| **H2 Expensive capabilities** | **Confirmed and removed** | Baseline `canRetrieveWindowContent=true` and flags included `flagRetrieveInteractiveWindows`, `flagIncludeNotImportantViews`, `flagRequestEnhancedWebAccessibility`, `flagReportViewIds` and `flagInputMethodEditor`; `dumpsys accessibility` reported `capabilities=9`. Current config is `canRetrieveWindowContent=false`, `flagDefault`, no node/window traversal; the emulator reported `capabilities=0`. |
+| **H3 Key-event filtering** | **Confirmed and removed** | Baseline requested `canRequestFilterKeyEvents=true` and `FLAG_REQUEST_FILTER_KEY_EVENTS`; every hardware key event was routed through the service. Current service has no key filtering and no `onKeyEvent`; the emulator config showed `capabilities=0`. |
+| **H4 Work per event** | **Confirmed reduced; residual cost remains** | The baseline already cached preferences in a listener, so per-event SharedPreferences reads were not the cause at `3196ae0`. The current hot path still converts `event.packageName` to a string, does a debounce comparison and a set lookup; daily mode also allocates a `Calendar` via `currentMinutes()` (F11). The event-path cost was not timed with `System.nanoTime`; no mean-duration claim is made. |
+| **H5 Ticking service** | **Confirmed and removed** | Baseline `scheduleAtFixedRate(..., 0, 1000)` wrote prefs every second in daily mode and called `notify()` every second; channel importance was HIGH with vibration/lights. Current code has one `Handler` callback at the boundary and a system-rendered chronometer. Measured notification: importance 4 → 2, vibration/lights enabled → disabled, text changed every 4 s → unchanged after 4 s, fixed `when` + chronometer after the fix. |
+| **H6 Activity launch loop** | **Ruled out** | The current service never starts `BlockingActivity`; it calls `GLOBAL_ACTION_HOME` or `GLOBAL_ACTION_LOCK_SCREEN`. The baseline also used the global actions from the accessibility service, so there was no activity relaunch loop to count. |
+| **H7 Duplicate accessibility services / plugin overhead** | **Ruled out in the delivered build** | The plugin is removed from `pubspec.yaml`; the merged release manifest contains exactly one app accessibility service. The plugin's own manifest had no `<service>` declaration and its `performGlobalAction` depended on a listener that was never registered, so it was inert at baseline and is now gone. |
+| **H8 Memory pressure** | **Not verified** | Baseline process RSS was 52,224 KB; after the fix it was 86,324 KB, but the post-fix process was a fresh app with a warm Flutter engine, so the numbers are not comparable. No low-RAM device or `dumpsys meminfo` comparison was possible. |
+| **H9 OEM behaviour** | **Likely** | The event firehose, key filtering, 1 Hz notification rebuild and high-importance vibration are exactly the kind of wakeup/CPU/notification churn that OEM battery/performance heuristics flag. The emulator cannot reproduce a Xiaomi/Realme/Oppo/Vivo/Samsung system warning; the physical-device test remains required. |
+
+### Root-cause assessment
+
+The strongest explanation for the reported system-wide lag is **H1 + H2 + H3 + H5**: an over-privileged accessibility service and a foreground service that rebuilt a high-importance notification every second. The service only needs `event.packageName` from a single event type, yet the baseline asked Android to deliver every window change and every key event with window-content capabilities. On a busy phone that means constant main-thread callbacks, input-path work and SystemUI notification rebuilds. The measured CPU and notification changes support the removal; the event-count and other-app-jank percentages are not claimed because those runs did not complete.
 
 ### Before/after measurements
 
-| Metric | Before | After | Evidence |
+| Metric | Baseline (`3196ae0`) | After (`fix/review-and-lag`) | How measured |
 |---|---:|---:|---|
-| Accessibility events/minute while scrolling | Not measured | Not measured | No Android device/emulator; only debug counter code exists. |
-| Mean `onAccessibilityEvent` duration | Not measured | Not measured | No duration instrumentation; do not infer from source. |
-| Other-app janky frame percentage/p90/p95/p99 | Not measured | Not measured | No device/emulator or target heavy app. |
-| App CPU while idle session active | Not measured | Not measured | No device/emulator. Source has no recurring service tick; accessibility still receives window changes. |
-| App wakeups/minute | Not measured | Not measured | No device/emulator/batterystats. |
-| Notification `notify()` per second | Prior implementation loop was removed; baseline count not collected | 0/sec by code path; notification updates only at start/state boundary | Source inspection; not device trace. |
-| Debug APK | N/A | Built successfully | `build/app/outputs/flutter-apk/app-debug.apk`, 168,918,657 bytes. |
+| Accessibility event types | `TYPE_WINDOW_STATE_CHANGED` + `TYPE_WINDOWS_CHANGED` | `TYPE_WINDOW_STATE_CHANGED` only | `adb shell dumpsys accessibility` |
+| Accessibility capabilities | 9 | 0 | `adb shell dumpsys accessibility` |
+| Notification timeout | 50 ms | 100 ms | `adb shell dumpsys accessibility` |
+| Accessibility events during a 60 s interval with 40 SETTINGS/HOME cycles | 182 | Not captured (run interrupted) | Debug-only counter in the service, read with `adb logcat -s FocusBlockerA11y` |
+| App CPU while idle with a session, 120 s | 0.24 CPU-s (24 ticks) | `<0.01 CPU-s` (0 ticks) | Process `utime+stime` sampled over 120 s |
+| Notification importance | 4 (HIGH) | 2 (LOW) | `adb shell dumpsys notification --noredact` |
+| Notification vibration/lights | enabled | disabled | `adb shell dumpsys notification --noredact` |
+| Notification text/update | `Apps blocked for 00:14:44` → `00:14:40` after 4 s | `Selected apps are blocked`, unchanged after 4 s | Notification dumps and screenshots |
+| Daily notification | n/a in this measurement | `Disconnect is blocking apps` / `Blocked until 8:55 PM`, importance 2, fixed `when` | Notification dump |
+| Process RSS | 52,224 KB | 86,324 KB | `dumpsys meminfo`; **not comparable** (different process state) |
+| Other-app jank p90/p95/p99 | Not measured | Not measured | Need `dumpsys gfxinfo` with and without a session on a physical device |
+| Blocked-app interception | Not re-run | Verified: launching `com.google.android.deskclock` returned to `com.google.android.apps.nexuslauncher` | `adb shell am start` + `dumpsys activity` |
+| Active UI with native session | Crash risk from input-method enumeration | App opened and showed `Blocking active for 1 app(s)` + countdown | Emulator screenshot |
 
-Exact device commands to run once a device is attached (replace `OTHER_APP` with Chrome/YouTube package):
-
-```bash
-adb shell dumpsys accessibility
-adb shell top -H -d 2 -n 20 | grep -i focusblocker
-adb shell dumpsys cpuinfo | grep -i focusblocker
-adb shell dumpsys batterystats --charged com.antigravity.focusblocker.focus_blocker
-adb shell dumpsys gfxinfo OTHER_APP reset
-# Scroll the other app for 60 seconds, then:
-adb shell dumpsys gfxinfo OTHER_APP
-adb logcat -c
-adb logcat -v time | grep -i -E 'FocusBlockerA11y|AppBlockingService|Disconnect'
-adb shell dumpsys meminfo com.antigravity.focusblocker.focus_blocker
-```
-
-Collect each command for an idle baseline and an active session, then repeat while scrolling the same app/device/OEM for 60 seconds. Do not compare measurements across different devices or refresh rates. `adb devices -l` returned no device; starting the adb daemon failed due sandbox operation restrictions.
+Acceptance criteria from the brief: the **CPU-idle**, **no-per-second-notify** and **blocking-still-works** criteria are met on the emulator. The **≥90% event drop** and **no measurable jank** criteria are **not established** because the after-counter and frame-jank runs did not complete; the exact commands are in the test section.
 
 ## Improvement roadmap
 
 | Priority | Improvement | Impact | Effort | Risk |
 |---|---|---|---|---|
-| P0 | Device/OEM profiling and manual acceptance runs for current event and session behavior | High | S | Low; measurement only |
-| P1 | Native single-source session repository/API; remove duplicate Flutter session fields | High | M | Medium; migration and restart edge cases |
-| P1 | Health screen for accessibility, notification, usage access and service-loss state; persistent warning if disabled mid-session | High | M | Medium; permission state differs by OS/OEM |
-| P1 | Verify special-use FGS declaration and boot-start restrictions against current Android/Play policy; configure release signing | High | S | Medium; may require different architecture/type |
-| P1 | Unit tests for time math, schedule boundaries, exemption and debounce; Android manual/instrumented tests | High | M | Low |
-| P2 | Make exemptions user-editable, including essential apps; document unavoidable escape routes | High | M | Medium; whole-device locking safety |
-| P2 | Most-used app suggestions with UsageStats access explanation and opt-in | Medium | M | Medium; sensitive special access |
-| P2 | Daily per-app budgets, local-only statistics and recurring profiles | High | L | Medium; usage events/data retention |
-| P2 | Fallback when service is disabled, force-stop, reboot, process death or expiry; clarify one-time session recovery | High | M | Medium; OS/OEM restrictions |
-| P3 | Gentle/strict friction modes and bounded emergency unlocks | Medium | M | Medium; product semantics |
-| P3 | Quick Settings tile/widget; opt-in notification muting with separate Notification Listener disclosure | Medium | L | High; new platform permissions/services |
-| P3 | A11y/dark-mode/localized strings and replace generated branding; package rename only with migration plan | Medium | M | Medium |
-| P3 | Remove unused generated platforms or document Android-only support; add CI analyze/test/build | Low | S | Low |
+| P0 | Re-run the event counter and `gfxinfo` on a physical phone (including a Xiaomi/Realme/Samsung if possible), with and without a session | High | S | Low; measurement only |
+| P1 | Native single-source session repository; remove duplicated Flutter end-time/schedule fields | High | M | Medium; migration and restart edge cases |
+| P1 | Health screen: accessibility, notification permission, FGS state and service-loss warning | High | M | Medium; OS/OEM differences |
+| P1 | Stop the daily FGS outside the window; add an AlarmManager/WorkManager backstop for expiry and boundaries | High | M | Medium; exact-alarm/FGS restrictions |
+| P1 | Make essential-app exemptions user-editable (Phone, Messages, Maps, banking) | High | M | Medium; whole-device lockout safety |
+| P1 | Verify `specialUse` policy, configure release signing, and test Android 14/15 boot-start rules | High | S | Medium; store/platform policy |
+| P2 | "Most used apps" suggestions via UsageStatsManager with an explicit opt-in/explanation | Medium | M | Medium; sensitive special access |
+| P2 | Daily per-app budgets, local-only statistics, profiles (Study/Work/Sleep) | High | L | Medium; data retention/design |
+| P2 | Gentle/strict friction modes and bounded emergency unlocks | Medium | M | Medium; product semantics |
+| P3 | Quick Settings tile/widget; opt-in notification muting via NotificationListenerService | Medium | L | High; extra permission/service |
+| P3 | Show system apps in the picker; remove dead `BlockingActivity`/`UsageStatsUtil`; fix app identity | Medium | S/M | Low |
+| P3 | Dark-mode/a11y/localization polish and bundled fonts (already removed runtime `google_fonts`) | Medium | M | Low |
+| P3 | Keep CI on analyze/test/debug build and add Android instrumentation tests | Medium | M | Low |
 
-The working tree also adds a meaningful startup widget test, explicit accessibility disclosure, app picker lazy icon work, cached session status, a debug-only once-per-minute event counter, and CI workflow. These are low-risk improvements already present; no additional feature proposal was implemented during this evidence review.
+## Manual test checklist and ADB commands
 
-## Manual test checklist
+1. Install the debug APK on Android 7/API 24 and a current Android 14/15/16 phone; record build, API and OEM.
+2. Start a selected-app session with accessibility off. Confirm the disclosure names package-name access, opens Accessibility settings, and the screen says blocking is inactive.
+3. Enable the service; open a blocked app and confirm it returns Home within ~300 ms. Open unblocked apps, Disconnect, Settings, launcher, keyboard, phone and emergency dialer and confirm they are not blocked.
+4. Run whole-device mode; turn the screen off/on and confirm re-lock, safe unlock, Settings reachable and the service can be disabled.
+5. Start a short session; replace it, stop/expire it; verify notification and state cleanup. Change the clock both ways and verify the running timer uses elapsed realtime.
+6. Start a daily schedule crossing midnight; verify before/start/inside/end/next day; test timezone and DST changes.
+7. Reboot during a one-time session and a daily schedule; test app update recovery; force-stop and confirm honest UI after reopening.
+8. Deny notifications on Android 13+; disable/re-enable accessibility mid-session; observe status and notification channel importance/sound/chronometer.
+9. Scroll a heavy app for 60 s with and without a session; capture CPU, events, frame stats, logs, battery stats and memory.
+10. Test empty app set, zero/negative duration, invalid schedule, expired session on reboot and starting a second session while one is active.
 
-1. Install debug APK on Android 7/API 24 and a current Android 14/15/16 device; record build/API/OEM.
-2. Start a selected-app session with accessibility disabled. Confirm disclosure explains package-name access/local processing, Settings opens, app reports blocking inactive, then enable service and confirm status refreshes on resume.
-3. Open one blocked app; confirm it returns Home promptly. Open unblocked apps, Disconnect, Settings, launcher, keyboard, phone and emergency dialer; confirm exemption behavior. Validate banking/maps/messaging apps before using whole-device mode.
-4. Run whole-device mode, turn screen off/on and confirm screen lock behavior, safe unlock, and ability to reach Settings/disable the accessibility service.
-5. Start a short session, replace it with another session, stop/expire it, and check notification/state cleanup. Change system clock both directions; confirm elapsed timer behavior during current boot. Check expiry when display is off and when app UI is backgrounded.
-6. Start a daily schedule crossing midnight; verify before/start/inside/end/next day boundary and equality rejection. Test timezone change and daylight-saving transitions (not currently handled by dedicated receiver).
-7. Reboot during an active one-time session and daily schedule. Test app update recovery; separately force-stop app and confirm platform restrictions and honest UI after reopening.
-8. Deny notifications on Android 13+, deny/re-enable accessibility mid-session, and observe warning/status. Inspect notification channel importance, sound and chronometer.
-9. Scroll a heavy app for 60 seconds with and without an active session. Capture commands above and compare CPU, event counts, frame stats, logs, battery stats and memory.
-10. Confirm empty app set, zero/negative duration, invalid schedule, expired session on reboot, and selecting a second session while one is active.
+Commands used or recommended:
+
+```bash
+adb install -r build/app/outputs/flutter-apk/app-debug.apk
+adb shell pm grant com.antigravity.focusblocker.focus_blocker android.permission.POST_NOTIFICATIONS
+adb shell settings put secure enabled_accessibility_services \
+  com.antigravity.focusblocker.focus_blocker/com.antigravity.focusblocker.focus_blocker.FocusBlockerAccessibilityService
+adb shell dumpsys accessibility
+adb shell dumpsys notification --noredact | grep -A8 -i disconnect
+adb shell dumpsys meminfo com.antigravity.focusblocker.focus_blocker
+adb shell dumpsys cpuinfo | grep -i focusblocker
+adb shell dumpsys batterystats --charged com.antigravity.focusblocker.focus_blocker
+adb logcat -s FocusBlockerA11y
+adb shell am start -a android.settings.SETTINGS
+adb shell input keyevent 3
+adb shell dumpsys activity activities | grep -i mResumedActivity
+adb shell dumpsys gfxinfo OTHER_APP reset
+# scroll OTHER_APP for 60 s, then:
+adb shell dumpsys gfxinfo OTHER_APP
+```
+
+For a controlled event-rate comparison, run 40 `SETTINGS` + Home cycles and read the debug counter's next 60-second log. The baseline produced 182 events in that interval; repeat the identical sequence on the fixed APK and on a physical phone.
 
 ## Build and check evidence
 
-Commands run:
+Commands run on 2026-11-12:
 
 - `flutter --version` → Flutter 3.44.1 stable, Dart 3.12.1.
-- `flutter pub get` → Got dependencies; 17 packages have newer versions available but incompatible with current constraints.
-- `flutter analyze` → `No issues found! (ran in 1.5s)`.
-- `flutter test` → `00:01 +8: All tests passed!` (2 widget tests; test harness emits multiple pump frames).
-- `flutter build apk --debug` → `✓ Built build/app/outputs/flutter-apk/app-debug.apk`; Gradle task 21.8s.
-- Build warning: Flutter warns app and plugins `installed_apps`, `shared_preferences_android` apply Kotlin Gradle Plugin and may fail in future Flutter versions; migrate to built-in Kotlin when plugins support it.
-- `./gradlew :app:processDebugMainManifest` was separately attempted but the wrapper could not write to `/home/benson-cherian-suresh/.gradle/...`; the successful Flutter build generated and was used to inspect the merged manifest.
-- `adb devices -l` → no device; adb daemon startup failed with `Operation not permitted`.
+- `flutter analyze` → `No issues found! (ran in 2.3s)`.
+- `flutter test` → `00:01 +8: All tests passed!` (2 widget tests + 6 schedule tests).
+- `flutter build apk --debug` → `✓ Built build/app/outputs/flutter-apk/app-debug.apk`; Gradle assembleDebug 6.4 s; APK 168,918,657 bytes.
+- `./gradlew :app:processReleaseMainManifest` → `BUILD SUCCESSFUL in 2s`; release merged manifest contains no `INTERNET`, `QUERY_ALL_PACKAGES`, `REQUEST_DELETE_PACKAGES`, `SYSTEM_ALERT_WINDOW`, `PACKAGE_USAGE_STATS` or `DISABLE_KEYGUARD`.
 - `git diff --check` → no whitespace errors.
+- Build warning: Flutter reports that the app and the `installed_apps` / `shared_preferences_android` plugins apply the Kotlin Gradle Plugin and may fail in a future Flutter version; current build succeeds.
 
-## Known limitations
+## Known limitations and unverified items
 
-- There are no before/after device performance measurements, no measured event duration, CPU, battery, frame-jank, wakeup or resident-memory figures. The lag source is strongly supported by the old configuration and code pattern, but actual system-wide causal contribution and percentage improvement remain **Likely**, not measured.
-- Android 10–16 background activity/FGS behavior and OEM-specific restrictions are not manually tested. The implementation currently avoids background activity launch by sending Home/Lock global actions.
-- `BlockingActivity` is dead/legacy code; product behavior is a Home redirect rather than a blocking countdown screen. This is an explicit behavior difference from historical docs.
-- Flutter and native prefs remain duplicated for selected apps, end time and schedule. Native active status is used to avoid trusting stale Flutter state, but the data ownership is not fully consolidated.
-- Force-stop defeats background services/receivers until the user launches the app again; this cannot be prevented by an ordinary foreground service.
-- Direct boot, time-change receiver, notification-permission health UI, low-RAM profiling, Play policy acceptance and release signing were not verified.
-- App id is `com.antigravity.focusblocker.focus_blocker`; Kotlin namespace and id are internally aligned, but public naming remains `Disconnect` and Dart package is `focus_blocker`.
-- Generated iOS/Linux/macOS/Windows/web folders remain; only Android implements the blocking behavior.
+- **No physical-device measurements.** Everything in the measurement table is from the Android 14 API 34 `google_apis` x86_64 emulator. A Xiaomi/Realme/Oppo/Vivo/Samsung battery or performance warning cannot be reproduced there.
+- **The post-fix event count and other-app jank percentage are not measured.** The counter run was interrupted by the test-host restart. The commands above reproduce them; do not treat the configuration change as a measured 90% event reduction.
+- **RSS is not comparable.** The after run included a warm Flutter engine; no low-RAM/memory-pressure conclusion is drawn.
+- **Daily schedules keep the foreground service alive all day** even outside the window; expiry cleanup uses a Handler that does not fire during deep sleep (F9, F10).
+- **Time-zone/clock changes** are not handled by a receiver; the elapsed-time authority protects a running session, but the next daily boundary can be wrong after a manual clock change.
+- **Force-stop defeats background work** until the app is opened again; a foreground service cannot prevent this.
+- **Release signing uses the debug key**, and `specialUse` foreground-service policy approval is unverified.
+- **Flutter and native state remain duplicated** for selected apps/schedule; native active status is authoritative, but the setup fields are not fully consolidated.
+- **The picker hides preinstalled apps** (`excludeSystemApps: true`), so Chrome and some social apps may be missing.
+- **No Android instrumentation tests**; the 8 Dart tests cover startup and schedule math only.
+- **Direct boot/LOCKED_BOOT** is not supported; preferences are credential-protected.
+- **The plugin removal is not a Play-policy review.** AccessibilityService use still requires a prominent disclosure and policy justification.
+
+## Commits on `fix/review-and-lag`
+
+- `e535a6b` — `fix: reduce Android background work during sessions`
+- `4efc112` — `feat: improve session setup and native state sync`
+- `c39b633` — `docs: record verified behavior and lag review`
+- `f5a8545` — `ci: add Flutter checks and ignore build artifacts`
+- `221aadd` — `fix: track schedule tests in git`
+- The report update is the final commit on the branch.
