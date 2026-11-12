@@ -61,7 +61,7 @@ Measurement environment: Android 14 emulator (API 34, `google_apis`, x86_64, AVD
 | F16 | Low | Confirmed | `android/app/build.gradle.kts:33-38`; `android/app/src/main/kotlin/.../UsageStatsUtil.kt:15` | Release builds still use the debug signing key, and `UsageStatsUtil` is unused (and its `getForegroundApp` returns a class name, not a package). | Cannot publish safely; dead utility may mislead future work. | Configure release signing; remove or implement usage stats behind a permission flow. | Proposed |
 | F17 | Low | Confirmed | `.gitignore` (baseline of this review); `test/schedule_test.dart` | A `/test/` ignore rule excluded the schedule tests from git, so CI would only see the widget tests. | The test suite was not actually versioned; future clones would silently lose coverage. | Removed `/test/` from `.gitignore` and added `test/schedule_test.dart`. | Fixed in this review |
 | F18 | Low | Confirmed | `FocusBlockerAccessibilityService.kt:246-259` | Reading `Settings.Secure.ENABLED_INPUT_METHODS` directly threw `SecurityException` on targetSdk 36 during emulator testing. | Opening the service could crash the app and disable blocking. | Use `InputMethodManager.enabledInputMethodList` instead. | Fixed (`e535a6b`) |
-| F19 | Low | Confirmed | `AppBlockingService.kt:250-308` (`formatTime`), daily boundary logic | Daily boundary math uses the default time zone and there is no `ACTION_TIME_CHANGED`/`ACTION_TIMEZONE_CHANGED` receiver. | After a time-zone or manual clock change, the next boundary can be wrong until the app/service is restarted. | Add a time-change receiver and reconcile the boundary. | Proposed |
+| F19 | Low | Confirmed | `AppBlockingService.kt:221-227`, `310-313` | Daily boundary math uses the default time zone and there is no `ACTION_TIME_CHANGED`/`ACTION_TIMEZONE_CHANGED` receiver. | After a time-zone or manual clock change, the next boundary can be wrong until the app/service is restarted. | Add a time-change receiver and reconcile the boundary. | Proposed |
 | F20 | Low | Confirmed | `pubspec.yaml:37-38` (`installed_apps`, `shared_preferences_android`) | Flutter warns that these plugins apply the Kotlin Gradle Plugin and will fail in future Flutter versions. | The build works now but will break on a future Flutter upgrade. | Migrate when plugin versions support Built-in Kotlin. | Proposed |
 
 ## Lag investigation
@@ -190,4 +190,4 @@ Commands run on 2026-11-12:
 - `c39b633` — `docs: record verified behavior and lag review`
 - `f5a8545` — `ci: add Flutter checks and ignore build artifacts`
 - `221aadd` — `fix: track schedule tests in git`
-- The report update is the final commit on the branch.
+- The final report/test commits are the tip of the branch; run `git log --oneline` for their hashes.
