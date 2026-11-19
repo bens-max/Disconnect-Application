@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/storage_service.dart';
+import '../services/native_service.dart';
 import 'active_lock_screen.dart';
 import 'app_selection_screen.dart';
 import 'schedule_screen.dart';
@@ -18,37 +19,21 @@ class TimerScreen extends StatefulWidget {
 
 class _TimerScreenState extends State<TimerScreen> {
   final StorageService _storageService = StorageService();
-  final _hoursController = TextEditingController(text: '00');
-  final _minutesController = TextEditingController(text: '00');
+  final _hoursController = TextEditingController();
+  final _minutesController = TextEditingController();
   final _hoursFocusNode = FocusNode();
   final _minutesFocusNode = FocusNode();
   _TimerType _timerType = _TimerType.oneTime;
   _BlockingScope _scope = _BlockingScope.selectedApps;
   int _selectedAppCount = 0;
   bool _isStarting = false;
+  bool _hasActiveSession = false;
 
   @override
   void initState() {
     super.initState();
     _loadSelectedApps();
-    // Auto-select all text when the field is focused so the user can
-    // immediately type their value without deleting the placeholder "00".
-    _hoursFocusNode.addListener(() {
-      if (_hoursFocusNode.hasFocus) {
-        _hoursController.selection = TextSelection(
-          baseOffset: 0,
-          extentOffset: _hoursController.text.length,
-        );
-      }
-    });
-    _minutesFocusNode.addListener(() {
-      if (_minutesFocusNode.hasFocus) {
-        _minutesController.selection = TextSelection(
-          baseOffset: 0,
-          extentOffset: _minutesController.text.length,
-        );
-      }
-    });
+    _loadActiveState();
   }
 
   Future<void> _loadSelectedApps() async {
@@ -58,6 +43,19 @@ class _TimerScreenState extends State<TimerScreen> {
         _selectedAppCount = apps.length;
       });
     }
+  }
+
+  Future<void> _loadActiveState() async {
+    final status = await NativeService.getBlockingStatus();
+    final endTime = await _storageService.getEndTime();
+    final schedules = await _storageService.getSchedules();
+    if (!mounted) return;
+    setState(() {
+      _hasActiveSession =
+          status.isActive ||
+          (endTime != null && endTime.isAfter(DateTime.now())) ||
+          schedules.isNotEmpty;
+    });
   }
 
   Future<void> _chooseApps() async {
@@ -161,6 +159,23 @@ class _TimerScreenState extends State<TimerScreen> {
             children: [
               _buildWelcomeCard(theme),
               const SizedBox(height: 20),
+              if (_hasActiveSession) ...[
+                OutlinedButton.icon(
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const ActiveLockScreen()),
+                  ),
+                  icon: const Icon(Icons.timer_outlined),
+                  label: const Text('View remaining time'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(52),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
               _buildTimerTypeSelector(theme),
               const SizedBox(height: 20),
               if (_timerType == _TimerType.oneTime)
@@ -291,7 +306,7 @@ class _TimerScreenState extends State<TimerScreen> {
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-                    _buildNumberField(_hoursController, _hoursFocusNode, 'Hours'),
+            _buildNumberField(_hoursController, _hoursFocusNode, 'Hours'),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14),
               child: Text(
@@ -329,16 +344,12 @@ class _TimerScreenState extends State<TimerScreen> {
             ],
             style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w300),
             decoration: const InputDecoration(
-              hintText: '00',
+              hintText: '',
               contentPadding: EdgeInsets.symmetric(vertical: 14),
             ),
-            // When editing is complete (e.g. user presses Done), pad with
-            // leading zeros so the field always looks clean: "5" → "05".
             onEditingComplete: () {
               final val = controller.text;
-              if (val.isEmpty) {
-                controller.text = '00';
-              } else if (label == 'Minutes' && val.length < 2) {
+              if (val.isNotEmpty && label == 'Minutes' && val.length < 2) {
                 controller.text = val.padLeft(2, '0');
               }
               focusNode.unfocus();
