@@ -253,72 +253,74 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
                       );
                       return RepaintBoundary(
                         child: Container(
-                        margin: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 3,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isSelected
-                              ? _accent.withValues(alpha: 0.12)
-                              : Colors.transparent,
-                          borderRadius: BorderRadius.circular(18),
-                          border: Border.all(
-                            color: isSelected
-                                ? _accent.withValues(alpha: 0.45)
-                                : Colors.transparent,
-                          ),
-                        ),
-                        child: ListTile(
-                          contentPadding: const EdgeInsets.symmetric(
+                          margin: const EdgeInsets.symmetric(
                             horizontal: 12,
-                            vertical: 2,
+                            vertical: 3,
                           ),
-                          leading: Container(
-                            padding: const EdgeInsets.all(4),
-                            decoration: BoxDecoration(
+                          decoration: BoxDecoration(
+                            color: isSelected
+                                ? _accent.withValues(alpha: 0.12)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
                               color: isSelected
-                                  ? _accent.withValues(alpha: 0.2)
-                                  : Colors.white10,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child:
-                                _appIcons.containsKey(app.packageName) &&
-                                    _appIcons[app.packageName] != null
-                                ? Image.memory(
-                                    _appIcons[app.packageName]!,
-                                    width: 42,
-                                    height: 42,
-                                  )
-                                : const Icon(Icons.android, size: 42),
-                          ),
-                          title: Text(
-                            app.name,
-                            style: const TextStyle(fontWeight: FontWeight.w600),
-                          ),
-                          subtitle: Text(
-                            app.packageName,
-                            style: const TextStyle(
-                              color: Colors.grey,
-                              fontSize: 12,
+                                  ? _accent.withValues(alpha: 0.45)
+                                  : Colors.transparent,
                             ),
                           ),
-                          trailing: AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 180),
-                            child: isSelected
-                                ? Icon(
-                                    Icons.check_circle,
-                                    key: const ValueKey('selected'),
-                                    color: _accent,
-                                  )
-                                : const Icon(
-                                    Icons.add_circle_outline,
-                                    key: ValueKey('unselected'),
-                                    color: Colors.grey,
-                                  ),
+                          child: ListTile(
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 2,
+                            ),
+                            leading: Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                color: isSelected
+                                    ? _accent.withValues(alpha: 0.2)
+                                    : Colors.white10,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child:
+                                  _appIcons.containsKey(app.packageName) &&
+                                      _appIcons[app.packageName] != null
+                                  ? Image.memory(
+                                      _appIcons[app.packageName]!,
+                                      width: 42,
+                                      height: 42,
+                                    )
+                                  : const Icon(Icons.android, size: 42),
+                            ),
+                            title: Text(
+                              app.name,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            subtitle: Text(
+                              app.packageName,
+                              style: const TextStyle(
+                                color: Colors.grey,
+                                fontSize: 12,
+                              ),
+                            ),
+                            trailing: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 180),
+                              child: isSelected
+                                  ? Icon(
+                                      Icons.check_circle,
+                                      key: const ValueKey('selected'),
+                                      color: _accent,
+                                    )
+                                  : const Icon(
+                                      Icons.add_circle_outline,
+                                      key: ValueKey('unselected'),
+                                      color: Colors.grey,
+                                    ),
+                            ),
+                            onTap: () => _toggleSelection(app.packageName),
                           ),
-                          onTap: () => _toggleSelection(app.packageName),
                         ),
-                      ),
                       );
                     },
                   ),
