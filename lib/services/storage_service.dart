@@ -1,4 +1,6 @@
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
+import '../utils/schedule.dart';
 
 class StorageService {
   static const String _keyBlockedApps = 'blocked_apps';
@@ -6,6 +8,7 @@ class StorageService {
   static const String _keyScheduleStartMinutes = 'schedule_start_minutes';
   static const String _keyScheduleEndMinutes = 'schedule_end_minutes';
   static const String _keyWholeDeviceMode = 'whole_device_mode';
+  static const String _keySchedules = 'scheduled_windows';
 
   Future<void> saveBlockedApps(List<String> packageNames) async {
     final prefs = await SharedPreferences.getInstance();
@@ -54,6 +57,34 @@ class StorageService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_keyScheduleStartMinutes);
     await prefs.remove(_keyScheduleEndMinutes);
+  }
+
+  Future<void> saveSchedules(List<ScheduledWindow> schedules) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      _keySchedules,
+      schedules.map((schedule) => schedule.encode()).toList(),
+    );
+  }
+
+  Future<List<ScheduledWindow>> getSchedules() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = prefs.getStringList(_keySchedules) ?? [];
+    return encoded.map((item) {
+      final json = item;
+      final decoded = _decodeJson(json);
+      return ScheduledWindow.fromJson(decoded);
+    }).toList();
+  }
+
+  Future<void> clearSchedules() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_keySchedules);
+  }
+
+  Map<String, dynamic> _decodeJson(String json) {
+    final decoded = jsonDecode(json);
+    return Map<String, dynamic>.from(decoded as Map);
   }
 
   Future<void> saveWholeDeviceMode(bool enabled) async {
