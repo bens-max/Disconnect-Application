@@ -5,6 +5,16 @@ import 'package:flutter/services.dart';
 class NativeService {
   static const platform = MethodChannel('com.antigravity.focusblocker/native');
 
+  static NativeServiceException _exception(Object error) {
+    if (error is PlatformException) {
+      return NativeServiceException(
+        error.code,
+        error.message ?? error.toString(),
+      );
+    }
+    return NativeServiceException('NATIVE_SERVICE_ERROR', error.toString());
+  }
+
   /// Initialize the native service
   static Future<void> initialize() async {
     try {
@@ -42,9 +52,10 @@ class NativeService {
         'wholeDevice': wholeDevice,
       });
       return result ?? false;
-    } catch (e) {
-      debugPrint('Error starting native blocking: $e');
-      return false;
+    } on Object catch (error) {
+      final exception = _exception(error);
+      debugPrint('Error starting native blocking: ${exception.message}');
+      throw exception;
     }
   }
 
@@ -85,9 +96,23 @@ class NativeService {
         'endMinutes': endMinutes,
       });
       return result ?? false;
-    } catch (e) {
-      debugPrint('Error starting daily schedule: $e');
-      return false;
+    } on Object catch (error) {
+      throw _exception(error);
+    }
+  }
+
+  static Future<bool> startSchedules(
+    List<String> blockedApps,
+    List<Map<String, dynamic>> schedules,
+  ) async {
+    try {
+      final result = await platform.invokeMethod<bool>('startSchedules', {
+        'blockedApps': blockedApps,
+        'schedules': schedules,
+      });
+      return result ?? false;
+    } on Object catch (error) {
+      throw _exception(error);
     }
   }
 
@@ -168,4 +193,14 @@ class BlockingStatus {
   String toString() =>
       'BlockingStatus(isActive: $isActive, timeLeft: $timeLeft, '
       'blockedApps: ${blockedApps.length})';
+}
+
+class NativeServiceException implements Exception {
+  final String code;
+  final String message;
+
+  const NativeServiceException(this.code, this.message);
+
+  @override
+  String toString() => message;
 }
