@@ -1,4 +1,36 @@
 /// Pure schedule math shared by the Dart UI and its unit tests.
+import 'dart:convert';
+
+class ScheduledWindow {
+  final int startMinutes;
+  final int endMinutes;
+  final Set<int> days;
+
+  const ScheduledWindow({
+    required this.startMinutes,
+    required this.endMinutes,
+    required this.days,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'startMinutes': startMinutes,
+    'endMinutes': endMinutes,
+    'days': days.toList()..sort(),
+  };
+
+  factory ScheduledWindow.fromJson(Map<String, dynamic> json) {
+    return ScheduledWindow(
+      startMinutes: json['startMinutes'] as int,
+      endMinutes: json['endMinutes'] as int,
+      days: ((json['days'] as List<dynamic>? ?? const [])
+          .map((day) => day as int)
+          .toSet()),
+    );
+  }
+
+  String encode() => jsonEncode(toJson());
+}
+
 class ScheduleWindow {
   final int startMinutes;
   final int endMinutes;
