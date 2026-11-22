@@ -4,6 +4,7 @@ import 'screens/active_lock_screen.dart';
 import 'services/storage_service.dart';
 import 'services/native_service.dart';
 import 'utils/schedule.dart';
+import 'screens/onboarding_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,7 +14,9 @@ void main() async {
   final storageService = StorageService();
   final endTime = await storageService.getEndTime();
   final schedule = await storageService.getDailySchedule();
+  final schedules = await storageService.getSchedules();
   final blockedApps = await storageService.getBlockedApps();
+  final onboardingComplete = await storageService.isOnboardingComplete();
   final nativeStatus = await NativeService.getBlockingStatus();
 
   var isLockActive = nativeStatus.isActive;
@@ -30,7 +33,25 @@ void main() async {
     }
   }
 
-  if (schedule != null) {
+  if (schedules.isNotEmpty) {
+    await NativeService.startSchedules(
+      blockedApps,
+      schedules.map((item) => item.toJson()).toList(),
+    );
+    final now = DateTime.now();
+    final dartDay = now.weekday;
+    var inSchedule = false;
+    for (final item in schedules) {
+      if (item.days.contains(dartDay)) {
+        final window = ScheduleWindow(
+          startMinutes: item.startMinutes,
+          endMinutes: item.endMinutes,
+        );
+        if (window.contains(now)) inSchedule = true;
+      }
+    }
+    if (inSchedule) isLockActive = true;
+  } else if (schedule != null) {
     final window = ScheduleWindow(
       startMinutes: schedule.startMinutes,
       endMinutes: schedule.endMinutes,
@@ -55,13 +76,23 @@ void main() async {
     }
   }
 
-  runApp(FocusBlockerApp(isLockActive: isLockActive));
+  runApp(
+    FocusBlockerApp(
+      isLockActive: isLockActive,
+      onboardingComplete: onboardingComplete,
+    ),
+  );
 }
 
 class FocusBlockerApp extends StatelessWidget {
   final bool isLockActive;
+  final bool onboardingComplete;
 
-  const FocusBlockerApp({super.key, required this.isLockActive});
+  const FocusBlockerApp({
+    super.key,
+    required this.isLockActive,
+    this.onboardingComplete = true,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -114,7 +145,11 @@ class FocusBlockerApp extends StatelessWidget {
           ),
         ),
       ),
-      home: isLockActive ? const ActiveLockScreen() : const TimerScreen(),
+      home: !onboardingComplete
+          ? const OnboardingScreen()
+          : isLockActive
+          ? const ActiveLockScreen()
+          : const TimerScreen(),
     );
   }
 }
