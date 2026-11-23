@@ -4,6 +4,7 @@ import '../services/storage_service.dart';
 import '../services/native_service.dart';
 import '../utils/schedule.dart';
 import 'timer_screen.dart';
+import 'blocking_health_screen.dart';
 
 class ActiveLockScreen extends StatefulWidget {
   const ActiveLockScreen({super.key});
@@ -19,11 +20,15 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
 
   Timer? _timer;
   ScheduleWindow? _schedule;
+  List<ScheduledWindow> _schedules = [];
   bool _accessibilityEnabled = false;
   String _statusMessage = 'Initializing...';
   bool _permissionDialogVisible = false;
   BuildContext? _permissionDialogContext;
   bool _nativeBlockingStarted = false;
+  bool _showEmergencyExit = false;
+  int _blockedAppCount = 0;
+  bool _wholeDeviceBlocking = false;
 
   @override
   void initState() {
@@ -33,6 +38,8 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
   }
 
   Future<void> _bootstrap() async {
+    _blockedAppCount = (await _storageService.getBlockedApps()).length;
+    _wholeDeviceBlocking = await _storageService.getWholeDeviceMode();
     await _checkPermissions();
     await _startCountdown();
   }
@@ -60,13 +67,21 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
       _statusMessage = isEnabled
           ? 'Accessibility service enabled'
           : 'Accessibility service is off — apps are NOT being blocked';
+      _showEmergencyExit = !isEnabled;
     });
 
     if (isEnabled) {
       _dismissPermissionDialog();
       if (!_nativeBlockingStarted) {
         _nativeBlockingStarted = true;
-        await _startNativeBlocking();
+        try {
+          await _startNativeBlocking();
+          await _refreshEmergencyExitAvailability();
+        } on NativeServiceException catch (error) {
+          _nativeBlockingStarted = false;
+          _showEmergencyExit = true;
+          _setStatus(error.message);
+        }
       }
       return;
     }
@@ -130,12 +145,12 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
     final blockedApps = await _storageService.getBlockedApps();
     final wholeDevice = await _storageService.getWholeDeviceMode();
     final schedule = await _storageService.getDailySchedule();
+    final schedules = await _storageService.getSchedules();
     final endTime = await _storageService.getEndTime();
 
-    // The native service is authoritative. If it is already blocking but the
-    // Flutter-side copy is missing (for example after an app update or a
-    // process restart), do not overwrite the real state with "no session".
-    if (schedule == null && endTime == null) {
+    // Native state is authoritative. Avoid restarting an existing session
+    // merely because Flutter preferences are stale or missing.
+    try {
       final nativeStatus = await NativeService.getBlockingStatus();
       if (nativeStatus.isActive) {
         _setStatus(
@@ -143,6 +158,19 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
         );
         return true;
       }
+    } on NativeServiceException catch (error) {
+      _setStatus(error.message);
+      return false;
+    }
+
+    if (schedules.isNotEmpty) {
+      if (blockedApps.isEmpty) return false;
+      final success = await NativeService.startSchedules(
+        blockedApps,
+        schedules.map((item) => item.toJson()).toList(),
+      );
+      _setStatus(success ? 'Schedules active' : 'Failed to activate schedules');
+      return success;
     }
 
     if (schedule != null) {
@@ -209,11 +237,53 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
   }
 
   void _setStatus(String message) {
-    if (!mounted || message == _statusMessage) return;
-    setState(() => _statusMessage = message);
+    if (!mounted) return;
+    final failure =
+        message.toLowerCase().contains('failed') ||
+        message.toLowerCase().contains('could not') ||
+        message.toLowerCase().contains('no active');
+    if (message == _statusMessage && failure == _showEmergencyExit) return;
+    setState(() {
+      _statusMessage = message;
+      if (failure) {
+        _showEmergencyExit = true;
+      } else if (_accessibilityEnabled) {
+        _showEmergencyExit = false;
+      }
+    });
+  }
+
+  Future<void> _refreshEmergencyExitAvailability() async {
+    final endTime = await _storageService.getEndTime();
+    final schedules = await _storageService.getSchedules();
+    final dailySchedule = await _storageService.getDailySchedule();
+    final nativeStatus = await NativeService.getBlockingStatus();
+    if (!mounted) return;
+
+    final oneShotLooksPending =
+        endTime != null &&
+        endTime.isAfter(DateTime.now()) &&
+        schedules.isEmpty &&
+        dailySchedule == null;
+    final nativeSessionMismatch = oneShotLooksPending && !nativeStatus.isActive;
+
+    setState(() {
+      _showEmergencyExit = !_accessibilityEnabled || nativeSessionMismatch;
+    });
   }
 
   Future<void> _startCountdown() async {
+    final schedules = await _storageService.getSchedules();
+    if (schedules.isNotEmpty) {
+      _schedules = schedules;
+      _timer?.cancel();
+      _timer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _updateSchedulesCountdown(),
+      );
+      _updateSchedulesCountdown();
+      return;
+    }
     final schedule = await _storageService.getDailySchedule();
     if (schedule != null) {
       _schedule = ScheduleWindow(
@@ -260,6 +330,8 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
   }
 
   Future<void> _syncWithNative() async {
+    final schedules = await _storageService.getSchedules();
+    if (schedules.isNotEmpty) return;
     final schedule = await _storageService.getDailySchedule();
     if (schedule != null) {
       return;
@@ -300,6 +372,35 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
     );
   }
 
+  void _updateSchedulesCountdown() {
+    final now = DateTime.now();
+    final inWindow = _schedules.any((schedule) {
+      if (!schedule.days.contains(now.weekday)) return false;
+      return ScheduleWindow(
+        startMinutes: schedule.startMinutes,
+        endMinutes: schedule.endMinutes,
+      ).contains(now);
+    });
+    Duration remaining = const Duration(days: 1);
+    DateTime? next;
+    for (final schedule in _schedules) {
+      final window = ScheduleWindow(
+        startMinutes: schedule.startMinutes,
+        endMinutes: schedule.endMinutes,
+      );
+      if (!schedule.days.contains(now.weekday) && !window.isValid) continue;
+      final boundary = window.nextBoundary(now);
+      if (boundary.isAfter(now) && (next == null || boundary.isBefore(next))) {
+        next = boundary;
+      }
+    }
+    if (next != null) remaining = next.difference(now);
+    _timeLeft.value = remaining;
+    _setStatus(
+      inWindow ? 'Apps are disconnected' : 'Next scheduled disconnect',
+    );
+  }
+
   String _formatClock(int minutes) {
     final hour = minutes ~/ 60;
     final minute = minutes % 60;
@@ -312,6 +413,7 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
     _timer?.cancel();
     _timer = null;
     await _storageService.clearDailySchedule();
+    await _storageService.clearSchedules();
     await _storageService.saveEndTime(null);
     await _storageService.saveWholeDeviceMode(false);
     await NativeService.stopBlocking();
@@ -347,6 +449,31 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
     if (shouldEnd == true) await _endSession();
   }
 
+  Future<void> _confirmEmergencyExit() async {
+    final shouldExit = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Emergency exit?'),
+        content: const Text(
+          'This immediately ends blocking and clears the active native session. '
+          'Use this only when the app or timer is stuck.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep blocking'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('End blocking now'),
+          ),
+        ],
+      ),
+    );
+    if (shouldExit == true) await _endSession();
+  }
+
   String _formatDuration(Duration duration) {
     String twoDigits(int n) => n.toString().padLeft(2, '0');
     final twoDigitMinutes = twoDigits(duration.inMinutes.remainder(60));
@@ -365,56 +492,37 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Focus Blocking Active')),
+      appBar: AppBar(
+        leading: IconButton(
+          tooltip: 'Back to timers',
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.of(
+            context,
+          ).push(MaterialPageRoute(builder: (_) => const TimerScreen())),
+        ),
+        title: const Text('Disconnected'),
+        actions: [
+          IconButton(
+            tooltip: 'Blocking health',
+            icon: const Icon(Icons.health_and_safety_outlined),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const BlockingHealthScreen()),
+            ),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Status Card
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 350),
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  color: _accessibilityEnabled
-                      ? const Color(0xFF03DAC6).withValues(alpha: 0.1)
-                      : Colors.red.withValues(alpha: 0.1),
-                  border: Border.all(
-                    color: _accessibilityEnabled
-                        ? const Color(0xFF03DAC6)
-                        : Colors.red,
-                  ),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 250),
-                      child: Text(
-                        _statusMessage,
-                        key: ValueKey(_statusMessage),
-                        style: TextStyle(
-                          color: _accessibilityEnabled
-                              ? const Color(0xFF03DAC6)
-                              : Colors.red,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 32),
-
-              // Timer Display
               Center(
                 child: Column(
                   children: [
                     const Text(
-                      'Time Remaining',
+                      'Time remaining',
                       style: TextStyle(fontSize: 16, color: Color(0xFFB0BEC5)),
                     ),
                     const SizedBox(height: 16),
@@ -429,7 +537,7 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
                         builder: (context, timeLeft, _) => Text(
                           _formatDuration(timeLeft),
                           style: const TextStyle(
-                            fontSize: 48,
+                            fontSize: 56,
                             fontWeight: FontWeight.bold,
                             color: Color(0xFF03DAC6),
                             fontFamily: 'monospace',
@@ -440,68 +548,51 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
                   ],
                 ),
               ),
-              const SizedBox(height: 32),
-
-              // Information
+              const SizedBox(height: 36),
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1E1E1E),
+                  color: const Color(0xFF232323),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(color: Colors.white10),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                child: Row(
                   children: [
-                    const Text(
-                      'Blocking Mechanism:',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFFBB86FC),
+                    const Icon(
+                      Icons.shield_rounded,
+                      color: Color(0xFF03DAC6),
+                      size: 32,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Blocking mode',
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            _wholeDeviceBlocking
+                                ? 'Whole device'
+                                : 'Selected apps',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    _buildInfoRow(
-                      '✓',
-                      'Accessibility service detects app launches',
-                    ),
-                    _buildInfoRow(
-                      '✓',
-                      'Foreground service keeps the session and ends it on time',
-                    ),
-                    _buildInfoRow(
-                      '✓',
-                      'Opening a blocked app returns you to the home screen',
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24),
-
-              // Warning
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.orange.withValues(alpha: 0.1),
-                  border: Border.all(color: Colors.orange),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: const Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
                     Text(
-                      'Important:',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.orange,
+                      _wholeDeviceBlocking
+                          ? 'All apps'
+                          : '$_blockedAppCount app${_blockedAppCount == 1 ? '' : 's'}',
+                      style: const TextStyle(
+                        color: Color(0xFF03DAC6),
+                        fontWeight: FontWeight.bold,
                       ),
-                    ),
-                    SizedBox(height: 8),
-                    Text(
-                      'The Accessibility Service must remain enabled for the blocking to work. If you turn it off, apps will no longer be blocked.',
-                      style: TextStyle(fontSize: 13, color: Colors.orange),
                     ),
                   ],
                 ),
@@ -515,36 +606,20 @@ class _ActiveLockScreenState extends State<ActiveLockScreen>
                   ),
                 ),
               ],
-              const SizedBox(height: 24),
+              if (_showEmergencyExit) ...[
+                const SizedBox(height: 32),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _confirmEmergencyExit,
+                    icon: const Icon(Icons.exit_to_app),
+                    label: const Text('Emergency exit'),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _buildInfoRow(String icon, String text) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            icon,
-            style: const TextStyle(
-              fontSize: 16,
-              color: Color(0xFF03DAC6),
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              text,
-              style: const TextStyle(fontSize: 13, color: Color(0xFFB0BEC5)),
-            ),
-          ),
-        ],
       ),
     );
   }
