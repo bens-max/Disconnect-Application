@@ -5,6 +5,7 @@ import '../services/native_service.dart';
 import 'active_lock_screen.dart';
 import 'app_selection_screen.dart';
 import 'schedule_screen.dart';
+import 'blocking_health_screen.dart';
 
 enum _TimerType { oneTime, daily }
 
@@ -25,6 +26,7 @@ class _TimerScreenState extends State<TimerScreen> {
   final _minutesFocusNode = FocusNode();
   _TimerType _timerType = _TimerType.oneTime;
   _BlockingScope _scope = _BlockingScope.selectedApps;
+  bool _showCustomDuration = false;
   int _selectedAppCount = 0;
   bool _isStarting = false;
   bool _hasActiveSession = false;
@@ -37,7 +39,14 @@ class _TimerScreenState extends State<TimerScreen> {
   }
 
   Future<void> _loadSelectedApps() async {
-    final apps = await _storageService.getBlockedApps();
+    final status = await NativeService.getBlockingStatus();
+    final nativeApps = status.blockedApps;
+    final apps = nativeApps.isNotEmpty
+        ? nativeApps
+        : await _storageService.getBlockedApps();
+    if (nativeApps.isNotEmpty) {
+      await _storageService.saveBlockedApps(nativeApps);
+    }
     if (mounted) {
       setState(() {
         _selectedAppCount = apps.length;
@@ -47,15 +56,13 @@ class _TimerScreenState extends State<TimerScreen> {
 
   Future<void> _loadActiveState() async {
     final status = await NativeService.getBlockingStatus();
-    final endTime = await _storageService.getEndTime();
-    final schedules = await _storageService.getSchedules();
     if (!mounted) return;
-    setState(() {
-      _hasActiveSession =
-          status.isActive ||
-          (endTime != null && endTime.isAfter(DateTime.now())) ||
-          schedules.isNotEmpty;
-    });
+    setState(() => _hasActiveSession = status.isActive);
+  }
+
+  Future<bool> _isBlockingCurrentlyActive() async {
+    final status = await NativeService.getBlockingStatus();
+    return status.isActive;
   }
 
   Future<void> _chooseApps() async {
@@ -71,6 +78,15 @@ class _TimerScreenState extends State<TimerScreen> {
   Future<void> _disconnect() async {
     if (_isStarting) return;
     if (_timerType == _TimerType.daily) {
+      if (await _isBlockingCurrentlyActive()) {
+        if (mounted) {
+          setState(() => _hasActiveSession = true);
+          _showMessage(
+            'Apps are already disconnected. End the current session before starting another timer.',
+          );
+        }
+        return;
+      }
       if (_scope == _BlockingScope.allApps) {
         _showMessage(
           'Daily whole-device blocking is not available yet. Choose selected apps.',
@@ -81,6 +97,7 @@ class _TimerScreenState extends State<TimerScreen> {
         _showMessage('Select at least one app for the daily timer.');
         return;
       }
+      if (!mounted) return;
       await Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => const ScheduleScreen()),
@@ -100,6 +117,15 @@ class _TimerScreenState extends State<TimerScreen> {
       _showMessage('Enter a duration greater than zero.');
       return;
     }
+    if (await _isBlockingCurrentlyActive()) {
+      if (mounted) {
+        setState(() => _hasActiveSession = true);
+        _showMessage(
+          'Apps are already disconnected. End the current session before starting another timer.',
+        );
+      }
+      return;
+    }
     if (_scope == _BlockingScope.selectedApps && _selectedAppCount == 0) {
       _showMessage('Select at least one app to disconnect.');
       return;
@@ -107,10 +133,31 @@ class _TimerScreenState extends State<TimerScreen> {
 
     setState(() => _isStarting = true);
     await _storageService.clearDailySchedule();
+    await _storageService.clearSchedules();
     await _storageService.saveWholeDeviceMode(_scope == _BlockingScope.allApps);
-    await _storageService.saveEndTime(
-      DateTime.now().add(Duration(hours: hours, minutes: minutes)),
+    final blockedApps = await _storageService.getBlockedApps();
+    final endTime = DateTime.now().add(
+      Duration(hours: hours, minutes: minutes),
     );
+    try {
+      final started = await NativeService.startBlocking(
+        blockedApps,
+        endTime,
+        wholeDevice: _scope == _BlockingScope.allApps,
+      );
+      if (!started) {
+        throw const NativeServiceException(
+          'START_FAILED',
+          'The blocking session could not be started.',
+        );
+      }
+      await _storageService.saveEndTime(endTime);
+    } on NativeServiceException catch (error) {
+      if (!mounted) return;
+      setState(() => _isStarting = false);
+      _showMessage(error.message);
+      return;
+    }
     if (!mounted) return;
     setState(() => _isStarting = false);
     Navigator.pushReplacement(
@@ -150,6 +197,27 @@ class _TimerScreenState extends State<TimerScreen> {
           ],
         ),
         backgroundColor: Colors.transparent,
+        actions: [
+          IconButton(
+            tooltip: 'Permitted apps',
+            icon: const Icon(Icons.shield_outlined),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) =>
+                    const AppSelectionScreen(permittedSelection: true),
+              ),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Blocking health',
+            icon: const Icon(Icons.health_and_safety_outlined),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const BlockingHealthScreen()),
+            ),
+          ),
+        ],
       ),
       body: SafeArea(
         child: SingleChildScrollView(
@@ -183,8 +251,12 @@ class _TimerScreenState extends State<TimerScreen> {
               else
                 _buildDailyIntro(theme),
               const SizedBox(height: 20),
+              _buildScopeSelector(theme),
+              const SizedBox(height: 20),
               ElevatedButton.icon(
-                onPressed: _isStarting ? null : _disconnect,
+                onPressed: _isStarting || _hasActiveSession
+                    ? null
+                    : _disconnect,
                 icon: Icon(
                   _timerType == _TimerType.daily
                       ? Icons.schedule
@@ -207,7 +279,6 @@ class _TimerScreenState extends State<TimerScreen> {
                 ),
               ),
               const SizedBox(height: 28),
-              _buildScopeSelector(theme),
             ],
           ),
         ),
@@ -271,16 +342,18 @@ class _TimerScreenState extends State<TimerScreen> {
         ButtonSegment(
           value: _TimerType.oneTime,
           icon: Icon(Icons.timer_outlined),
-          label: Text('Time timer'),
+          label: Text('One-time'),
         ),
         ButtonSegment(
           value: _TimerType.daily,
           icon: Icon(Icons.event_repeat),
-          label: Text('Daily timer'),
+          label: Text('Schedule'),
         ),
       ],
       selected: {_timerType},
-      onSelectionChanged: (value) => setState(() => _timerType = value.first),
+      onSelectionChanged: _hasActiveSession
+          ? null
+          : (value) => setState(() => _timerType = value.first),
       style: ButtonStyle(
         shape: WidgetStatePropertyAll(
           RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -290,6 +363,16 @@ class _TimerScreenState extends State<TimerScreen> {
   }
 
   Widget _buildDuration(ThemeData theme) {
+    final presets = <String, Duration>{
+      '25m': const Duration(minutes: 25),
+      '45m': const Duration(minutes: 45),
+      '1h': const Duration(hours: 1),
+      '2h': const Duration(hours: 2),
+    };
+    final currentMinutes =
+        (int.tryParse(_hoursController.text) ?? 0) * 60 +
+        (int.tryParse(_minutesController.text) ?? 0);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -299,27 +382,65 @@ class _TimerScreenState extends State<TimerScreen> {
         ),
         const SizedBox(height: 6),
         const Text(
-          'Adjust the hours and minutes below to set your disconnect time.',
+          'Choose a quick duration or enter a custom time.',
           style: TextStyle(color: Colors.grey),
         ),
         const SizedBox(height: 18),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
           children: [
-            _buildNumberField(_hoursController, _hoursFocusNode, 'Hours'),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              child: Text(
-                ':',
-                style: TextStyle(
-                  fontSize: 42,
-                  color: theme.colorScheme.primary,
-                ),
+            for (final entry in presets.entries)
+              ChoiceChip(
+                label: Text(entry.key),
+                selected:
+                    !_showCustomDuration &&
+                    currentMinutes == entry.value.inMinutes,
+                onSelected: _hasActiveSession
+                    ? null
+                    : (_) {
+                        setState(() {
+                          _showCustomDuration = false;
+                          _hoursController.text = entry.value.inHours
+                              .toString();
+                          _minutesController.text = (entry.value.inMinutes % 60)
+                              .toString();
+                        });
+                      },
               ),
+            ChoiceChip(
+              label: const Text('Custom'),
+              selected: _showCustomDuration,
+              onSelected: _hasActiveSession
+                  ? null
+                  : (_) => setState(() => _showCustomDuration = true),
             ),
-            _buildNumberField(_minutesController, _minutesFocusNode, 'Minutes'),
           ],
         ),
+        if (_showCustomDuration) ...[
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _buildNumberField(_hoursController, _hoursFocusNode, 'Hours'),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                child: Text(
+                  ':',
+                  style: TextStyle(
+                    fontSize: 42,
+                    color: theme.colorScheme.primary,
+                  ),
+                ),
+              ),
+              _buildNumberField(
+                _minutesController,
+                _minutesFocusNode,
+                'Minutes',
+              ),
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -336,6 +457,7 @@ class _TimerScreenState extends State<TimerScreen> {
           TextField(
             controller: controller,
             focusNode: focusNode,
+            enabled: !_hasActiveSession,
             keyboardType: TextInputType.number,
             textAlign: TextAlign.center,
             inputFormatters: [
@@ -344,7 +466,12 @@ class _TimerScreenState extends State<TimerScreen> {
             ],
             style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w300),
             decoration: const InputDecoration(
-              hintText: '',
+              hintText: '00',
+              hintStyle: TextStyle(
+                color: Color(0xFFB0BEC5),
+                fontSize: 38,
+                fontWeight: FontWeight.w300,
+              ),
               contentPadding: EdgeInsets.symmetric(vertical: 14),
             ),
             onEditingComplete: () {
@@ -403,11 +530,6 @@ class _TimerScreenState extends State<TimerScreen> {
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 12),
-        const Text(
-          'Choose this after setting your timer.',
-          style: TextStyle(color: Colors.grey, fontSize: 13),
-        ),
-        const SizedBox(height: 12),
         _scopeTile(
           theme,
           _BlockingScope.allApps,
@@ -438,10 +560,12 @@ class _TimerScreenState extends State<TimerScreen> {
   ) {
     final selected = _scope == scope;
     return InkWell(
-      onTap: () {
-        setState(() => _scope = scope);
-        if (scope == _BlockingScope.selectedApps) _chooseApps();
-      },
+      onTap: _hasActiveSession
+          ? null
+          : () {
+              setState(() => _scope = scope);
+              if (scope == _BlockingScope.selectedApps) _chooseApps();
+            },
       borderRadius: BorderRadius.circular(18),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
