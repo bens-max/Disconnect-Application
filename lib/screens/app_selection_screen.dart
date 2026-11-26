@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:installed_apps/installed_apps.dart';
@@ -38,6 +39,9 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
   String? _loadError;
   String _searchQuery = '';
   bool _showSystemApps = false;
+  bool _isSaving = false;
+  Timer? _searchDebounce;
+  final TextEditingController _searchController = TextEditingController();
   _AppCategoryFilter _categoryFilter = _AppCategoryFilter.all;
   final Map<String, Uint8List?> _appIcons = {};
   static List<AppInfo>? _appCache;
@@ -125,6 +129,7 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
   @override
   void initState() {
     super.initState();
+    _restorePickerPreferences();
     final cache = widget.permittedSelection ? _permittedAppCache : _appCache;
     if (cache != null) {
       _installedApps = cache;
@@ -138,7 +143,33 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
     _loadData();
   }
 
-  Future<void> _loadData() async {
+  Future<void> _restorePickerPreferences() async {
+    final prefs = await _storageService.getAppPickerPreferences();
+    if (!mounted) return;
+    setState(() {
+      _showSystemApps = prefs.showSystemApps;
+      _categoryFilter = _AppCategoryFilter.values.firstWhere(
+        (filter) => filter.name == prefs.category,
+        orElse: () => _AppCategoryFilter.all,
+      );
+    });
+  }
+
+  Future<void> _savePickerPreferences() async {
+    await _storageService.saveAppPickerPreferences(
+      showSystemApps: _showSystemApps,
+      category: _categoryFilter.name,
+    );
+  }
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadData({bool forceRefresh = false}) async {
     if (_appCache == null) {
       setState(() => _isLoading = true);
     }
@@ -147,8 +178,10 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
           _appCacheTime != null &&
           DateTime.now().difference(_appCacheTime!) < _appCacheLifetime;
       final appsFuture = widget.permittedSelection
-          ? (_permittedAppLoadFuture ??= _loadPermittedApps())
-          : (cacheIsFresh
+          ? (forceRefresh
+                ? (_permittedAppLoadFuture ??= _loadPermittedApps())
+                : (_permittedAppLoadFuture ??= _loadPermittedApps()))
+          : (!forceRefresh && cacheIsFresh
                 ? Future<List<AppInfo>>.value(_appCache!)
                 : (_appLoadFuture ??= _loadApps()));
       final selectedFuture = widget.permittedSelection
@@ -244,6 +277,9 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
       );
       for (final result in results) {
         _iconCache[result.key] = result.value;
+        if (_iconCache.length > _maxCachedIcons) {
+          _iconCache.remove(_iconCache.keys.first);
+        }
       }
       if (mounted) {
         setState(() {
@@ -309,9 +345,18 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
   bool _matchesPackage(AppInfo app, List<String> packages) {
     final packageName = app.packageName.toLowerCase();
     final name = app.name.toLowerCase();
-    return packages.any(
-      (item) => packageName.contains(item) || name.contains(item),
-    );
+    return packages.any((item) {
+      final packageMatch =
+          packageName == item ||
+          packageName.startsWith('$item.') ||
+          packageName.endsWith('.$item');
+      final normalizedName = name.replaceAll(RegExp(r'[^a-z0-9]'), '');
+      final normalizedItem = item.replaceAll(RegExp(r'[^a-z0-9]'), '');
+      final nameMatch =
+          normalizedName == normalizedItem ||
+          normalizedName.startsWith(normalizedItem);
+      return packageMatch || nameMatch;
+    });
   }
 
   void _toggleSelection(String packageName) {
@@ -361,6 +406,7 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
                             _categoryFilter = _AppCategoryFilter.all;
                           }
                         });
+                        _savePickerPreferences();
                       },
                     ),
                     const SizedBox(height: 6),
@@ -375,6 +421,7 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
                             onSelected: (_) {
                               setSheetState(() {});
                               setState(() => _categoryFilter = filter);
+                              _savePickerPreferences();
                               Navigator.pop(sheetContext);
                             },
                           ),
@@ -412,14 +459,35 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
   }
 
   Future<void> _confirmSelection() async {
-    if (widget.permittedSelection) {
-      final packageNames = _selectedPackages.toList();
-      await _storageService.savePermittedApps(packageNames);
-      await NativeService.savePermittedApps(packageNames);
-    } else {
-      await _storageService.saveBlockedApps(_selectedPackages.toList());
+    if (_isSaving) return;
+    setState(() => _isSaving = true);
+    final packageNames = _selectedPackages.toList();
+    try {
+      if (widget.permittedSelection) {
+        await _storageService.savePermittedApps(packageNames);
+        final savedNative = await NativeService.savePermittedApps(packageNames);
+        if (!savedNative) {
+          throw Exception('Could not save permitted apps');
+        }
+      } else {
+        await _storageService.saveBlockedApps(packageNames);
+        final savedNative = await NativeService.saveBlockedApps(packageNames);
+        if (!savedNative) {
+          throw Exception('Could not save blocked apps');
+        }
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isSaving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not save app selection. Please try again.'),
+        ),
+      );
+      return;
     }
     if (!mounted) return;
+    setState(() => _isSaving = false);
     if (widget.returnSelection) {
       Navigator.pop(context, true);
     } else {
@@ -434,6 +502,13 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        actions: [
+          IconButton(
+            tooltip: 'Refresh installed apps',
+            onPressed: _isLoading ? null : () => _loadData(forceRefresh: true),
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -472,14 +547,28 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
             child: Column(
               children: [
                 TextField(
-                  onChanged: (value) => setState(() => _searchQuery = value),
+                  controller: _searchController,
+                  onChanged: (value) {
+                    _searchDebounce?.cancel();
+                    _searchDebounce = Timer(
+                      const Duration(milliseconds: 180),
+                      () {
+                        if (!mounted) return;
+                        setState(() => _searchQuery = value);
+                      },
+                    );
+                  },
                   decoration: InputDecoration(
                     hintText: 'Search installed apps',
                     prefixIcon: const Icon(Icons.search, color: Colors.grey),
                     suffixIcon: _searchQuery.isEmpty
                         ? null
                         : IconButton(
-                            onPressed: () => setState(() => _searchQuery = ''),
+                            onPressed: () {
+                              _searchDebounce?.cancel();
+                              _searchController.clear();
+                              setState(() => _searchQuery = '');
+                            },
                             icon: const Icon(Icons.close),
                           ),
                     filled: true,
@@ -497,9 +586,12 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
                       child: ChoiceChip(
                         label: const Text('All apps'),
                         selected: _categoryFilter == _AppCategoryFilter.all,
-                        onSelected: (_) => setState(
-                          () => _categoryFilter = _AppCategoryFilter.all,
-                        ),
+                        onSelected: (_) {
+                          setState(
+                            () => _categoryFilter = _AppCategoryFilter.all,
+                          );
+                          _savePickerPreferences();
+                        },
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -507,6 +599,44 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
                       onPressed: _openFilterSheet,
                       icon: const Icon(Icons.tune, size: 18),
                       label: Text(_filterLabel(_categoryFilter)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    TextButton.icon(
+                      onPressed: () => setState(() {
+                        _selectedPackages.addAll(
+                          _filteredApps.map((app) => app.packageName),
+                        );
+                      }),
+                      icon: const Icon(Icons.done_all, size: 18),
+                      label: const Text('Select visible'),
+                    ),
+                    const Spacer(),
+                    TextButton.icon(
+                      onPressed: _selectedPackages.isEmpty
+                          ? null
+                          : () {
+                              final removed = Set<String>.from(
+                                _selectedPackages,
+                              );
+                              setState(() => _selectedPackages.clear());
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: const Text('Cleared app selection'),
+                                  action: SnackBarAction(
+                                    label: 'Undo',
+                                    onPressed: () => setState(
+                                      () => _selectedPackages.addAll(removed),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                      icon: const Icon(Icons.remove_done, size: 18),
+                      label: const Text('Clear'),
                     ),
                   ],
                 ),
@@ -575,59 +705,65 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
                                   : Colors.transparent,
                             ),
                           ),
-                          child: ListTile(
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 2,
-                            ),
-                            leading: Container(
-                              padding: const EdgeInsets.all(4),
-                              decoration: BoxDecoration(
-                                color: isSelected
-                                    ? _accent.withValues(alpha: 0.2)
-                                    : Colors.white10,
-                                borderRadius: BorderRadius.circular(12),
+                          child: Semantics(
+                            button: true,
+                            selected: isSelected,
+                            label:
+                                '${app.name}${isSelected ? ', selected' : ', not selected'}',
+                            child: ListTile(
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 2,
                               ),
-                              child:
-                                  _appIcons.containsKey(app.packageName) &&
-                                      _appIcons[app.packageName] != null
-                                  ? Image.memory(
-                                      _appIcons[app.packageName]!,
-                                      width: 42,
-                                      height: 42,
-                                    )
-                                  : const Icon(Icons.android, size: 42),
-                            ),
-                            title: Text(
-                              app.name,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
+                              leading: Container(
+                                padding: const EdgeInsets.all(4),
+                                decoration: BoxDecoration(
+                                  color: isSelected
+                                      ? _accent.withValues(alpha: 0.2)
+                                      : Colors.white10,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child:
+                                    _appIcons.containsKey(app.packageName) &&
+                                        _appIcons[app.packageName] != null
+                                    ? Image.memory(
+                                        _appIcons[app.packageName]!,
+                                        width: 42,
+                                        height: 42,
+                                      )
+                                    : const Icon(Icons.android, size: 42),
                               ),
-                            ),
-                            subtitle: Text(
-                              '${app.isSystemApp ? 'System app' : 'Installed app'}'
-                              ' • ${app.category.name}'
-                              '${app.isLaunchableApp ? ' • Launchable' : ' • Not launchable'}',
-                              style: const TextStyle(
-                                color: Colors.grey,
-                                fontSize: 12,
+                              title: Text(
+                                app.name,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
+                              subtitle: Text(
+                                '${app.isSystemApp ? 'System app' : 'Installed app'}'
+                                ' • ${app.category.name}'
+                                '${app.isLaunchableApp ? ' • Launchable' : ' • Not launchable'}',
+                                style: const TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              trailing: AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 180),
+                                child: isSelected
+                                    ? Icon(
+                                        Icons.check_circle,
+                                        key: const ValueKey('selected'),
+                                        color: _accent,
+                                      )
+                                    : const Icon(
+                                        Icons.add_circle_outline,
+                                        key: ValueKey('unselected'),
+                                        color: Colors.grey,
+                                      ),
+                              ),
+                              onTap: () => _toggleSelection(app.packageName),
                             ),
-                            trailing: AnimatedSwitcher(
-                              duration: const Duration(milliseconds: 180),
-                              child: isSelected
-                                  ? Icon(
-                                      Icons.check_circle,
-                                      key: const ValueKey('selected'),
-                                      color: _accent,
-                                    )
-                                  : const Icon(
-                                      Icons.add_circle_outline,
-                                      key: ValueKey('unselected'),
-                                      color: Colors.grey,
-                                    ),
-                            ),
-                            onTap: () => _toggleSelection(app.packageName),
                           ),
                         ),
                       );
@@ -642,8 +778,14 @@ class _AppSelectionScreenState extends State<AppSelectionScreen> {
           child: SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              onPressed: _confirmSelection,
-              icon: const Icon(Icons.done),
+              onPressed: _isSaving ? null : _confirmSelection,
+              icon: _isSaving
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.done),
               label: Text(
                 widget.permittedSelection
                     ? 'Keep ${_selectedPackages.length} permitted app${_selectedPackages.length == 1 ? '' : 's'}'
