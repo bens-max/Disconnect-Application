@@ -3,7 +3,6 @@ import 'screens/timer_screen.dart';
 import 'screens/active_lock_screen.dart';
 import 'services/storage_service.dart';
 import 'services/native_service.dart';
-import 'utils/schedule.dart';
 import 'screens/onboarding_screen.dart';
 
 void main() async {
@@ -12,68 +11,15 @@ void main() async {
   await NativeService.initialize();
 
   final storageService = StorageService();
-  final endTime = await storageService.getEndTime();
-  final schedule = await storageService.getDailySchedule();
-  final schedules = await storageService.getSchedules();
-  final blockedApps = await storageService.getBlockedApps();
   final onboardingComplete = await storageService.isOnboardingComplete();
   final nativeStatus = await NativeService.getBlockingStatus();
 
   var isLockActive = nativeStatus.isActive;
-
-  if (!isLockActive && endTime != null) {
-    if (endTime.isAfter(DateTime.now())) {
-      // The Flutter-side session is still pending (for example the process was
-      // killed right after the timer was saved). Let ActiveLockScreen start the
-      // native session again.
-      isLockActive = true;
-    } else {
-      await storageService.saveEndTime(null);
-      await storageService.saveWholeDeviceMode(false);
-    }
-  }
-
-  if (schedules.isNotEmpty) {
-    await NativeService.startSchedules(
-      blockedApps,
-      schedules.map((item) => item.toJson()).toList(),
-    );
-    final now = DateTime.now();
-    final dartDay = now.weekday;
-    var inSchedule = false;
-    for (final item in schedules) {
-      if (item.days.contains(dartDay)) {
-        final window = ScheduleWindow(
-          startMinutes: item.startMinutes,
-          endMinutes: item.endMinutes,
-        );
-        if (window.contains(now)) inSchedule = true;
-      }
-    }
-    if (inSchedule) isLockActive = true;
-  } else if (schedule != null) {
-    final window = ScheduleWindow(
-      startMinutes: schedule.startMinutes,
-      endMinutes: schedule.endMinutes,
-    );
-    if (!window.isValid) {
-      await storageService.clearDailySchedule();
-      await NativeService.stopBlocking();
-    } else {
-      // A saved schedule must keep running even if Android killed the service
-      // while the app was closed. Starting it here also re-arms the next
-      // boundary after a force-stop.
-      if (blockedApps.isNotEmpty) {
-        await NativeService.startDailySchedule(
-          blockedApps,
-          schedule.startMinutes,
-          schedule.endMinutes,
-        );
-      }
-      if (window.contains(DateTime.now())) {
-        isLockActive = true;
-      }
-    }
+  if (nativeStatus.blockedApps.isNotEmpty) {
+    await storageService.saveBlockedApps(nativeStatus.blockedApps);
+  } else if (!isLockActive) {
+    await storageService.saveEndTime(null);
+    await storageService.saveWholeDeviceMode(false);
   }
 
   runApp(
